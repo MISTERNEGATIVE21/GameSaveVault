@@ -1,0 +1,31 @@
+{
+    "BackupRoot": "D:\\GameSaveVault",
+    "GameScanRoots": [
+        "D:\\Games",
+        "C:\\Program Files\\Steam\\steamapps\\common",
+        "C:\\Program Files\\Epic Games"
+    ],
+    "ExtraPaths": [],
+    "ExcludeNames": [
+        "cache",
+        "Cache",
+        "ShaderCache",
+        "shadercache",
+        "CrashReports",
+        "crashdumps",
+        "logs",
+        "Logs",
+        "__pycache__",
+        ".git"
+    ],
+    "ExcludeFiles": [
+        "*.log",
+        "*.tmp",
+        "*.dmp",
+        "*.etl"
+    ],
+    "HashFiles": false,
+    "KeepSnapshots": 8,
+    "RegistryExport": true,
+    "LastScanUtc": null
+}

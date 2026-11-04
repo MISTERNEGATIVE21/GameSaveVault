@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# GameSaveVault - gitignore
+# ---------------------------------------------------------------------------
+
+# local settings (your vault path, scan roots, custom games, logs)
+config/settings.json
+custom-games.json
+logs/
+*.log
+GSV-backup-*.zip
+
+# vault / snapshot output
+snapshots/
+rollback/
+backup-*/
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.tmp
+*.bak
+
+# editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# PowerShell module / build output
+node_modules/
+ps_modules/
+*.psm1.bak
+
+# test sandboxes
+gsv-selftest-*/
+gsv-oldtest-*/
+gsv-newos-*/
+gsv-diag-*/

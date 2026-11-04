@@ -1,0 +1,687 @@
+#requires -Version 5.1
+<#
+    GSV.Vault.psm1
+    Snapshot backup + restore engine for GameSaveVault.
+#>
+
+$script:GSVVersion = '1.0.0'
+$script:Root = Split-Path -Parent $PSScriptRoot
+
+#region ---------------------------------------------------------------- copy helpers
+
+function Invoke-GSVCopyTree {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [string[]]$ExcludeDirs = @(),
+        [string[]]$ExcludeFiles = @()
+    )
+
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    }
+
+    $robocopy = Get-Command robocopy.exe -ErrorAction SilentlyContinue
+    if (-not $robocopy) {
+        Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force -ErrorAction Stop
+        return
+    }
+
+    $args = @(
+        $Source, $Destination, '/E', '/R:1', '/W:1',
+        '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/COPY:DAT', '/DCOPY:DAT'
+    )
+    if ($ExcludeDirs.Count -gt 0)  { $args += '/XD'; $args += $ExcludeDirs }
+    if ($ExcludeFiles.Count -gt 0) { $args += '/XF'; $args += $ExcludeFiles }
+
+    $null = & robocopy @args 2>&1
+    $code = $LASTEXITCODE
+    # Robocopy: 0-7 = success (bits mean files copied/extras/etc), >=8 = failure.
+    if ($code -ge 8) {
+        throw "robocopy failed with exit code $code while copying '$Source'"
+    }
+}
+
+function Get-GSVManifestFileList {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$HashFiles
+    )
+    $list = New-Object System.Collections.Generic.List[object]
+
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $fi = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+        if ($fi) {
+            $item = [ordered]@{
+                Path         = $fi.Name
+                Size         = [int64]$fi.Length
+                LastWriteUtc = $fi.LastWriteTimeUtc.ToString('o')
+            }
+            if ($HashFiles) {
+                try { $item.Sha256 = (Get-FileHash -LiteralPath $fi.FullName -Algorithm SHA256).Hash } catch { }
+            }
+            $list.Add([pscustomobject]$item)
+        }
+        return $list.ToArray()
+    }
+
+    try {
+        foreach ($f in [System.IO.Directory]::EnumerateFiles($Path, '*', [System.IO.SearchOption]::AllDirectories)) {
+            try {
+                $fi = New-Object System.IO.FileInfo($f)
+                $rel = $fi.FullName.Substring($Path.TrimEnd('\').Length).TrimStart('\')
+                $item = [ordered]@{
+                    Path         = $rel
+                    Size         = [int64]$fi.Length
+                    LastWriteUtc = $fi.LastWriteTimeUtc.ToString('o')
+                }
+                if ($HashFiles) {
+                    try { $item.Sha256 = (Get-FileHash -LiteralPath $fi.FullName -Algorithm SHA256).Hash } catch { }
+                }
+                $list.Add([pscustomobject]$item)
+            } catch { }
+        }
+    } catch { }
+    return $list.ToArray()
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- snapshot creation
+
+function New-GSVSnapshot {
+    param(
+        [Parameter(Mandatory)][object[]]$Locations,
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string]$Label = 'manual',
+        [switch]$HashFiles,
+        [switch]$DryRun,
+        [string]$LogFile
+    )
+
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $safeLabel = ($Label -replace '[^A-Za-z0-9_-]', '_')
+    if ($safeLabel.Length -gt 30) { $safeLabel = $safeLabel.Substring(0, 30) }
+    if (-not $safeLabel) { $safeLabel = 'snapshot' }
+
+    $snapDir = Join-Path $BackupRoot ("snapshots\{0}_{1}" -f $stamp, $safeLabel)
+    $payloadRoot = Join-Path $snapDir 'payload'
+
+    $entries = New-Object System.Collections.Generic.List[object]
+    $errors = New-Object System.Collections.Generic.List[string]
+    $totalBytes = [int64]0
+    $totalFiles = 0
+    $index = 0
+
+    $settings = Get-GSVSettings
+    $excludeDirs = @($settings.ExcludeNames)
+    $excludeFiles = @($settings.ExcludeFiles)
+
+    if (-not $DryRun) {
+        New-Item -ItemType Directory -Path $payloadRoot -Force | Out-Null
+    }
+
+    foreach ($loc in $Locations) {
+        $index++
+        $display = if ($loc.Kind -eq 'Registry') { $loc.RegistryKey } else { $loc.ResolvedPath }
+
+        if ($loc.Kind -eq 'Registry') {
+            if ($DryRun) {
+                Write-GSVLog -Level Info -Message "[dry-run] registry  $display"
+                continue
+            }
+            try {
+                $regDir = Join-Path $payloadRoot ("{0:D4}" -f $index)
+                New-Item -ItemType Directory -Path $regDir -Force | Out-Null
+                $regFile = Join-Path $regDir 'registry.reg'
+                $null = & reg.exe export "$($loc.RegistryKey)" "$regFile" /y 2>&1
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $regFile)) {
+                    throw "reg.exe export failed (exit $LASTEXITCODE)"
+                }
+                $fi = Get-Item -LiteralPath $regFile
+                $entries.Add([pscustomobject]@{
+                    GameId         = $loc.GameId
+                    GameName       = $loc.GameName
+                    Source         = $loc.Source
+                    AppId          = $loc.AppId
+                    InstallDirHint = $loc.InstallDirHint
+                    Token          = $null
+                    RelativePath   = ''
+                    Kind           = 'Registry'
+                    RegistryKey    = $loc.RegistryKey
+                    Payload        = ("payload\{0:D4}" -f $index)
+                    PayloadFile    = 'registry.reg'
+                    FileCount      = 1
+                    Bytes          = [int64]$fi.Length
+                    Files          = @([pscustomobject]@{ Path = 'registry.reg'; Size = [int64]$fi.Length; LastWriteUtc = $fi.LastWriteTimeUtc.ToString('o') })
+                    Note           = $loc.Note
+                    Origin         = $loc.Origin
+                })
+                $totalBytes += [int64]$fi.Length
+                $totalFiles++
+                Write-GSVLog -Level Success -Message "registry   $display"
+            } catch {
+                $msg = "registry '$display': $($_.Exception.Message)"
+                $errors.Add($msg)
+                Write-GSVLog -Level Error -Message $msg
+            }
+            continue
+        }
+
+        if (-not (Test-Path -LiteralPath $loc.ResolvedPath)) {
+            $errors.Add("missing: $($loc.ResolvedPath)")
+            Write-GSVLog -Level Warn -Message "skipped (missing): $($loc.ResolvedPath)"
+            continue
+        }
+
+        if ($DryRun) {
+            Write-GSVLog -Level Info -Message ("[dry-run] {0,-11} {1}" -f $loc.Kind, $display)
+            continue
+        }
+
+        $payloadRel = "payload\{0:D4}" -f $index
+        $dest = Join-Path $snapDir $payloadRel
+
+        try {
+            if ($loc.Kind -eq 'File') {
+                New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                Copy-Item -LiteralPath $loc.ResolvedPath -Destination $dest -Force -ErrorAction Stop
+            } else {
+                New-Item -ItemType Directory -Path $dest -Force | Out-Null
+                Invoke-GSVCopyTree -Source $loc.ResolvedPath -Destination $dest -ExcludeDirs $excludeDirs -ExcludeFiles $excludeFiles
+            }
+
+            $files = @(Get-GSVManifestFileList -Path $dest -HashFiles:$HashFiles)
+            $bytes = [int64]0
+            foreach ($f in $files) { $bytes += [int64]$f.Size }
+
+            $entries.Add([pscustomobject]@{
+                GameId         = $loc.GameId
+                GameName       = $loc.GameName
+                Source         = $loc.Source
+                AppId          = $loc.AppId
+                InstallDirHint = $loc.InstallDirHint
+                Token          = $loc.Token
+                RelativePath   = $loc.RelativePath
+                AbsolutePath   = $loc.ResolvedPath
+                Kind           = $loc.Kind
+                RegistryKey    = $null
+                Payload        = $payloadRel
+                PayloadFile    = $null
+                FileCount      = $files.Count
+                Bytes          = $bytes
+                Files          = $files
+                Note           = $loc.Note
+                Origin         = $loc.Origin
+            })
+
+            $totalBytes += $bytes
+            $totalFiles += $files.Count
+            Write-GSVLog -Level Success -Message ("{0,-11} {1}  ({2} files, {3})" -f $loc.Kind, $display, $files.Count, (Format-GSVSize $bytes))
+        } catch {
+            $msg = "copy '$display': $($_.Exception.Message)"
+            $errors.Add($msg)
+            Write-GSVLog -Level Error -Message $msg
+        }
+    }
+
+    $manifest = [ordered]@{
+        Version      = 1
+        Tool         = 'GameSaveVault'
+        ToolVersion  = $script:GSVVersion
+        CreatedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+        Label        = $Label
+        Machine      = $env:COMPUTERNAME
+        User         = $env:USERNAME
+        Os           = [Environment]::OSVersion.VersionString
+        BackupRoot   = $BackupRoot
+        EntryCount   = $entries.Count
+        TotalFiles   = $totalFiles
+        TotalBytes   = $totalBytes
+        Entries      = $entries.ToArray()
+        Errors       = $errors.ToArray()
+    }
+
+    if (-not $DryRun) {
+        Write-GSVTextFile -Path (Join-Path $snapDir 'manifest.json') -Text ($manifest | ConvertTo-Json -Depth 12)
+    }
+
+    return [pscustomobject]@{
+        SnapshotPath = $snapDir
+        ManifestPath = (Join-Path $snapDir 'manifest.json')
+        Manifest     = [pscustomobject]$manifest
+        EntryCount   = $entries.Count
+        TotalFiles   = $totalFiles
+        TotalBytes   = $totalBytes
+        Errors       = $errors.ToArray()
+        DryRun       = [bool]$DryRun
+    }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- snapshot listing
+
+function Get-GSVSnapshots {
+    param([Parameter(Mandatory)][string]$BackupRoot)
+
+    $snapRoot = Join-Path $BackupRoot 'snapshots'
+    if (-not (Test-Path -LiteralPath $snapRoot)) { return @() }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($d in @(Get-ChildItem -LiteralPath $snapRoot -Directory -ErrorAction SilentlyContinue)) {
+        $manifestPath = Join-Path $d.FullName 'manifest.json'
+        $m = Read-GSVJson -Path $manifestPath
+        if (-not $m) { continue }
+        $result.Add([pscustomobject]@{
+            Path        = $d.FullName
+            Name        = $d.Name
+            CreatedUtc  = if ($m.CreatedUtc) { [string]$m.CreatedUtc } else { $d.CreationTimeUtc.ToString('o') }
+            Label       = [string]$m.Label
+            EntryCount  = [int]$m.EntryCount
+            TotalFiles  = [int]$m.TotalFiles
+            TotalBytes  = [int64]$m.TotalBytes
+            Machine     = [string]$m.Machine
+            User        = [string]$m.User
+            Errors      = @($m.Errors).Count
+            Manifest    = $m
+        })
+    }
+    return @($result | Sort-Object CreatedUtc -Descending)
+}
+
+function Get-GSVLatestSnapshot {
+    param([Parameter(Mandatory)][string]$BackupRoot)
+    $all = @(Get-GSVSnapshots -BackupRoot $BackupRoot)
+    if ($all.Count -eq 0) { return $null }
+    return $all[0]
+}
+
+function Resolve-GSVSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string]$Snapshot
+    )
+    if (-not $Snapshot -or $Snapshot -eq 'latest') {
+        $latest = Get-GSVLatestSnapshot -BackupRoot $BackupRoot
+        if (-not $latest) { throw "No snapshots found in '$BackupRoot'." }
+        return $latest
+    }
+    if (Test-Path -LiteralPath $Snapshot) {
+        $p = (Get-Item -LiteralPath $Snapshot).FullName
+        if (Test-Path -LiteralPath (Join-Path $p 'manifest.json')) {
+            return [pscustomobject]@{
+                Path = $p; Name = (Split-Path -Leaf $p); CreatedUtc = ''; Label = '';
+                EntryCount = 0; TotalFiles = 0; TotalBytes = 0; Machine = ''; User = ''; Errors = 0;
+                Manifest = (Read-GSVJson -Path (Join-Path $p 'manifest.json'))
+            }
+        }
+    }
+    $byName = @(Get-GSVSnapshots -BackupRoot $BackupRoot | Where-Object { $_.Name -eq $Snapshot -or $_.Name -like "*$Snapshot*" })
+    if ($byName.Count -ge 1) { return $byName[0] }
+    throw "Snapshot '$Snapshot' not found."
+}
+
+function Remove-GSVOldSnapshots {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [int]$Keep = 8,
+        [switch]$DryRun
+    )
+    $all = @(Get-GSVSnapshots -BackupRoot $BackupRoot)
+    if ($all.Count -le $Keep) { return @() }
+
+    $remove = @($all | Select-Object -Skip $Keep)
+    $removed = New-Object System.Collections.Generic.List[string>
+    foreach ($s in $remove) {
+        if ($DryRun) {
+            Write-GSVLog -Level Info -Message "[dry-run] would delete $($s.Path)"
+            $removed.Add($s.Path)
+            continue
+        }
+        try {
+            Remove-Item -LiteralPath $s.Path -Recurse -Force -ErrorAction Stop
+            $removed.Add($s.Path)
+            Write-GSVLog -Level Info -Message "deleted old snapshot $($s.Name)"
+        } catch {
+            Write-GSVLog -Level Warn -Message "could not delete '$($s.Path)': $($_.Exception.Message)"
+        }
+    }
+    return $removed.ToArray()
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- restore
+
+function Find-GSVGameDir {
+    param([string]$Hint)
+    if (-not $Hint) { return '' }
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    foreach ($lib in (Get-GSVSteamLibraries)) {
+        $candidates.Add((Join-Path $lib ('steamapps\common\' + $Hint)))
+    }
+    $settings = Get-GSVSettings
+    foreach ($root in @($settings.GameScanRoots)) {
+        if ($root) { $candidates.Add((Join-Path $root $Hint)) }
+    }
+
+    foreach ($c in $candidates) {
+        if (Test-Path -LiteralPath $c) {
+            return (Get-Item -LiteralPath $c -ErrorAction SilentlyContinue).FullName
+        }
+    }
+    return ''
+}
+
+function Resolve-GSVTargetPath {
+    param(
+        [Parameter(Mandatory)]$Entry,
+        [hashtable]$TokenTable
+    )
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+
+    if ($Entry.Kind -eq 'Registry') { return $null }
+
+    if ($Entry.Token -eq 'GAMEDIR') {
+        $dir = Find-GSVGameDir -Hint $Entry.InstallDirHint
+        if (-not $dir) { return $null }
+        if ($Entry.RelativePath) { return (Join-Path $dir $Entry.RelativePath) }
+        return $dir
+    }
+
+    if ($Entry.Token -eq 'STEAMUSERDATA') {
+        $root = $TokenTable['STEAMUSERDATA']
+        if (-not $root) { return $null }
+        $rel = [string]$Entry.RelativePath
+        $parts = @($rel -split '\\')
+        if ($parts.Count -ge 1 -and $parts[0] -match '^\d+$') {
+            $existing = Join-Path $root $parts[0]
+            if (-not (Test-Path -LiteralPath $existing)) {
+                $current = Get-GSVCurrentSteamUserId
+                if ($current) { $parts[0] = $current }
+            }
+        }
+        return (Join-Path $root ($parts -join '\'))
+    }
+
+    if (-not $Entry.Token) {
+        # Absolute path from the manifest (no token anchor). Keep it only if the
+        # drive exists; otherwise the caller reports it as unrestorable.
+        if ($Entry.AbsolutePath) { return [string]$Entry.AbsolutePath }
+        return $null
+    }
+
+    $rootValue = $TokenTable[$Entry.Token]
+    if (-not $rootValue) { return $null }
+    if ($Entry.RelativePath) { return (Join-Path $rootValue $Entry.RelativePath) }
+    return [string]$rootValue
+}
+
+function Move-GSVToRollback {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [Parameter(Mandatory)][string]$Stamp
+    )
+    $anchor = Get-GSVPathAnchor -ResolvedPath $Path
+    if ($anchor.Token) {
+        $key = Join-Path $anchor.Token $anchor.Relative
+    } else {
+        $safe = ($Path -replace '^([A-Za-z]):', '$1')
+        $key = $safe.TrimStart('\')
+    }
+    $dest = Join-Path $BackupRoot ("rollback\{0}\{1}" -f $Stamp, $key)
+
+    $destDir = Split-Path -Parent $dest
+    if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    }
+
+    try {
+        Move-Item -LiteralPath $Path -Destination $dest -Force -ErrorAction Stop
+        return $dest
+    } catch {
+        # Cross-volume move fallback.
+        if (Test-Path -LiteralPath $Path -PathType Container) {
+            Invoke-GSVCopyTree -Source $Path -Destination $dest
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Copy-Item -LiteralPath $Path -Destination $dest -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
+        return $dest
+    }
+}
+
+function Restore-GSVSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string]$Snapshot = 'latest',
+        [string[]]$GameFilter = @(),
+        [switch]$DryRun,
+        [switch]$SkipRegistry,
+        [switch]$NoRollback,
+        [switch]$KeepExisting,
+        [hashtable]$TokenTable,
+        [string]$LogFile
+    )
+
+    $snap = Resolve-GSVSnapshot -BackupRoot $BackupRoot -Snapshot $Snapshot
+    if (-not $snap.Manifest) { throw "Snapshot '$($snap.Path)' has no readable manifest.json." }
+
+    $manifest = $snap.Manifest
+    $entries = @($manifest.Entries)
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+    $table = $TokenTable
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+
+    $restored = 0
+    $skipped = 0
+    $failed = 0
+    $registry = 0
+    $bytes = [int64]0
+    $messages = New-Object System.Collections.Generic.List[string]
+
+    Write-GSVLog -Level Info -Message ("Snapshot: {0}  ({1} entries)" -f $snap.Path, $entries.Count)
+
+    foreach ($e in $entries) {
+        $label = if ($e.Kind -eq 'Registry') { $e.RegistryKey } else { "$($e.GameName): $($e.Token)\$($e.RelativePath)" }
+
+        if ($GameFilter.Count -gt 0) {
+            $hit = $false
+            foreach ($f in $GameFilter) {
+                if (Test-GSVNameSimilar -A $e.GameName -B $f) { $hit = $true; break }
+                if ($e.GameName -and $e.GameName.IndexOf($f, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true; break }
+            }
+            if (-not $hit) { $skipped++; continue }
+        }
+
+        if ($e.Kind -eq 'Registry') {
+            if ($SkipRegistry) { $skipped++; continue }
+            $payloadFile = Join-Path (Join-Path $snap.Path $e.Payload) $e.PayloadFile
+            if (-not (Test-Path -LiteralPath $payloadFile)) {
+                Write-GSVLog -Level Warn -Message "missing registry payload for $label"
+                $failed++
+                continue
+            }
+            if ($DryRun) {
+                Write-GSVLog -Level Info -Message "[dry-run] import registry  $label"
+                continue
+            }
+            try {
+                $null = & reg.exe import "$payloadFile" 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "reg.exe import exit $LASTEXITCODE" }
+                $registry++
+                Write-GSVLog -Level Success -Message "registry  $label"
+            } catch {
+                $failed++
+                $messages.Add("registry '$label': $($_.Exception.Message)")
+                Write-GSVLog -Level Error -Message "registry '$label': $($_.Exception.Message)"
+            }
+            continue
+        }
+
+        $target = Resolve-GSVTargetPath -Entry $e -TokenTable $table
+        if (-not $target) {
+            $reason = if ($e.Token -eq 'GAMEDIR') { 'game not installed (GAMEDIR not found)' } else { "token '$($e.Token)' unavailable" }
+            Write-GSVLog -Level Warn -Message "skipped $label ($reason)"
+            $skipped++
+            $messages.Add("skipped '$label': $reason")
+            continue
+        }
+
+        $payloadPath = Join-Path $snap.Path $e.Payload
+        if (-not (Test-Path -LiteralPath $payloadPath)) {
+            Write-GSVLog -Level Warn -Message "missing payload for $label"
+            $failed++
+            continue
+        }
+
+        if ($DryRun) {
+            $existsText = if (Test-Path -LiteralPath $target) { ' [overwrites existing]' } else { ' [new]' }
+            Write-GSVLog -Level Info -Message ("[dry-run] restore {0,-11} {1} -> {2}{3}" -f $e.Kind, $label, $target, $existsText)
+            continue
+        }
+
+        try {
+            if (Test-Path -LiteralPath $target) {
+                if ($KeepExisting) {
+                    Write-GSVLog -Level Info -Message "kept existing: $target"
+                    $skipped++
+                    continue
+                }
+                if (-not $NoRollback) {
+                    $null = Move-GSVToRollback -Path $target -BackupRoot $BackupRoot -Stamp $stamp
+                } else {
+                    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $targetDir = if ($e.Kind -eq 'File') { Split-Path -Parent $target } else { $target }
+            if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            }
+
+            if ($e.Kind -eq 'File') {
+                $srcFile = Get-ChildItem -LiteralPath $payloadPath -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $srcFile) { throw 'payload file missing' }
+                Copy-Item -LiteralPath $srcFile.FullName -Destination $target -Force -ErrorAction Stop
+            } else {
+                Invoke-GSVCopyTree -Source $payloadPath -Destination $target
+            }
+
+            $restored++
+            $bytes += [int64]$e.Bytes
+            Write-GSVLog -Level Success -Message ("restored {0,-11} {1} -> {2}" -f $e.Kind, $label, $target)
+        } catch {
+            $failed++
+            $messages.Add("restore '$label': $($_.Exception.Message)")
+            Write-GSVLog -Level Error -Message "restore '$label': $($_.Exception.Message)"
+        }
+    }
+
+    $summary = [pscustomobject]@{
+        SnapshotPath = $snap.Path
+        Restored     = $restored
+        Registry     = $registry
+        Skipped      = $skipped
+        Failed       = $failed
+        Bytes        = $bytes
+        Messages     = $messages.ToArray()
+        DryRun       = [bool]$DryRun
+    }
+
+    Write-GSVLog -Level Info -Message ("Done. restored={0} registry={1} skipped={2} failed={3} ({4})" -f $restored, $registry, $skipped, $failed, (Format-GSVSize $bytes))
+    return $summary
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- windows.old import
+
+function Import-GSVFromWindowsOld {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string]$WindowsOldRoot,
+        [string[]]$GameFilter = @(),
+        [switch]$DryRun,
+        [switch]$NoRestore,
+        [switch]$NoSize,
+        [string]$Label = 'windows-old'
+    )
+
+    $roots = if ($WindowsOldRoot) { @($WindowsOldRoot) } else { @(Get-GSVWindowsOldRoots) }
+    if ($roots.Count -eq 0) {
+        throw "No Windows.old folder found. Pass -WindowsOldRoot 'D:\Windows.old' if it is on another drive."
+    }
+
+    $all = New-Object System.Collections.Generic.List[object]
+    foreach ($root in $roots) {
+        Write-GSVLog -Level Info -Message "Scanning $root ..."
+        foreach ($loc in @(Get-GSVWindowsOldLocations -Root $root -Games $GameFilter -NoSize:$NoSize)) {
+            $all.Add($loc)
+        }
+    }
+
+    # De-duplicate across profiles by token+relative (first profile wins).
+    $seen = @{}
+    $unique = New-Object System.Collections.Generic.List[object]
+    foreach ($loc in $all) {
+        $key = ("{0}|{1}" -f $loc.Token, $loc.RelativePath).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $unique.Add($loc)
+    }
+
+    if ($unique.Count -eq 0) {
+        Write-GSVLog -Level Warn -Message 'Nothing found in Windows.old that looks like game saves.'
+        return [pscustomobject]@{ Locations = 0; Snapshot = $null; Restore = $null }
+    }
+
+    Write-GSVLog -Level Info -Message ("Found {0} save locations in Windows.old." -f $unique.Count)
+
+    $snap = New-GSVSnapshot -Locations $unique.ToArray() -BackupRoot $BackupRoot -Label $Label -DryRun:$DryRun
+    if ($DryRun -or $NoRestore) {
+        return [pscustomobject]@{ Locations = $unique.Count; Snapshot = $snap; Restore = $null }
+    }
+
+    $restore = Restore-GSVSnapshot -BackupRoot $BackupRoot -Snapshot $snap.SnapshotPath -GameFilter $GameFilter
+    return [pscustomobject]@{ Locations = $unique.Count; Snapshot = $snap; Restore = $restore }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- vault maintenance
+
+function Get-GSVVaultStats {
+    param([Parameter(Mandatory)][string]$BackupRoot)
+
+    $snapshots = @(Get-GSVSnapshots -BackupRoot $BackupRoot)
+    $rollbackRoot = Join-Path $BackupRoot 'rollback'
+    $rollbackBytes = [int64]0
+    if (Test-Path -LiteralPath $rollbackRoot) {
+        $s = Measure-GSVPathSize -Path $rollbackRoot
+        $rollbackBytes = [int64]$s.Bytes
+    }
+
+    $snapBytes = [int64]0
+    foreach ($s in $snapshots) { $snapBytes += [int64]$s.TotalBytes }
+
+    return [pscustomobject]@{
+        BackupRoot    = $BackupRoot
+        SnapshotCount = $snapshots.Count
+        SnapshotBytes = $snapBytes
+        RollbackBytes = $rollbackBytes
+        Latest        = if ($snapshots.Count) { $snapshots[0] } else { $null }
+        Snapshots     = $snapshots
+    }
+}
+
+#endregion
+
+Export-ModuleMember -Function *
