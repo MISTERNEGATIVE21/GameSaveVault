@@ -4,6 +4,8 @@
 
 # local settings (your vault path, scan roots, custom games, logs)
 config/settings.json
+config/games.custom.json
+config/save-rules.json
 custom-games.json
 logs/
 *.log

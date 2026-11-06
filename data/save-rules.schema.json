@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/gamesavevault/save-rules.schema.json",
+  "title": "GameSaveVault save rules",
+  "description": "Portable description of where a game keeps its saves. Used by scan, backup, discover and restore.",
+  "type": "object",
+  "required": ["schemaVersion", "rules"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "updatedUtc": { "type": "string" },
+    "exportedUtc": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/rule" }
+    }
+  },
+  "definitions": {
+    "rule": {
+      "type": "object",
+      "required": ["id", "name", "paths"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable identifier, e.g. rule-jump-force."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name. Also used as the default install folder name."
+        },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Alternative names used when matching a detected game."
+        },
+        "steamAppIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Steam / scene AppIDs that identify this game."
+        },
+        "installDirNames": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Folder names used to find the game on a new machine (Steam library, D:\\Games, repack folder, ...)."
+        },
+        "filePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Save file globs, e.g. *.sav, *.dat, slot*.bin."
+        },
+        "folderPatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Save folder globs used by discovery, e.g. *save*, SaveGames."
+        },
+        "engine": { "type": "string" },
+        "notes": { "type": "string" },
+        "discover": {
+          "type": "boolean",
+          "default": true,
+          "description": "When no path exists, search the game install for save-like folders."
+        },
+        "source": {
+          "enum": ["user", "builtin", "imported"]
+        },
+        "createdUtc": { "type": "string" },
+        "updatedUtc": { "type": "string" },
+        "paths": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/definitions/path" }
+            ]
+          }
+        }
+      }
+    },
+    "path": {
+      "type": "object",
+      "required": ["pattern"],
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Token pattern: %USERPROFILE%, %APPDATA%, %LOCALAPPDATA%, %LOCALLOW%, %DOCUMENTS%, %SAVEDGAMES%, %PUBLIC%, %PUBLICDOCS%, %PROGRAMDATA%, %STEAMUSERDATA%, %GAMEDIR%. Wildcards * and ? are allowed."
+        },
+        "mode": {
+          "enum": ["auto", "token", "gamedir", "absolute"],
+          "default": "auto",
+          "description": "How the path is restored: token = expand in the new profile; gamedir = next to the discovered game install; absolute = original path; auto = best effort."
+        },
+        "include": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "note": { "type": "string" },
+        "sample": {
+          "type": "string",
+          "description": "The absolute path this pattern was created from (informational)."
+        }
+      }
+    }
+  }
+}

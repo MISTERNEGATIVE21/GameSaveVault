@@ -294,21 +294,32 @@ function Select-SnapshotDialog {
 }
 
 function Show-DeepScanDialog {
-    $drive = Read-GuiText 'Deep scan' 'Drive to search (C:, D: ...) or type ALL for every fixed drive:' $env:SystemDrive
-    if (-not $drive) { return }
-
     $roots = New-Object System.Collections.Generic.List[string]
-    if ($drive -ieq 'all' -or $drive -ieq '*') {
+
+    # mode picker: search a drive, or one or more specific directories
+    $mode = Read-GuiText 'Deep scan - what to search?' "Type a drive letter (C:), ALL for every fixed drive,`nor a folder path (D:\Games, C:\PS5GAMES, ...):" $env:SystemDrive
+    if (-not $mode) { return }
+
+    if ($mode -ieq 'all' -or $mode -ieq '*') {
         foreach ($r in @(Get-GSVFixedDriveRoots)) { $roots.Add($r) }
     } else {
-        $p = [string]$drive
-        if ($p -match '^[A-Za-z]$') { $p = $p + ':\' }
-        elseif ($p -match '^[A-Za-z]:$') { $p = $p + '\' }
-        if (-not $p.EndsWith('\')) { $p += '\' }
-        $roots.Add($p)
+        # accept several paths separated by ';'
+        foreach ($part in ($mode -split ';')) {
+            $p = $part.Trim()
+            if (-not $p) { continue }
+            if ($p -match '^[A-Za-z]$') { $p = $p + ':\' }
+            elseif ($p -match '^[A-Za-z]:$') { $p = $p + '\' }
+            if (-not $p.EndsWith('\')) { $p += '\' }
+            $roots.Add($p)
+        }
+        # also offer a folder browser for a custom directory
+        if (($roots.Count -eq 0) -or (-not (Test-Path -LiteralPath ($roots[0].TrimEnd('\'))))) {
+            $picked = Select-Folder 'Choose a directory to deep-scan'
+            if ($picked) { $roots.Add($picked.TrimEnd('\') + '\') }
+        }
     }
 
-    if ($roots.Count -eq 0) { Show-Warn 'No drive to scan.'; return }
+    if ($roots.Count -eq 0) { Show-Warn 'No drive or directory to scan.'; return }
 
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     $statusLabel.Text = ('Deep scanning {0}...' -f ($roots -join ', '))
@@ -508,22 +519,427 @@ function Show-MigrateDialog {
     $dlg.Dispose()
 }
 
+#region ---------------------------------------------------------------- save rules editor
+
+function Format-RulePathEntry {
+    param($Entry)
+    if ($null -eq $Entry) { return '' }
+    $pat = if ($Entry -is [string]) { [string]$Entry } else { [string]$Entry.Pattern }
+    $mode = if ($Entry -is [string]) { 'auto' } else { [string]$Entry.Mode }
+    return ('{0}   [{1}]' -f $pat, $mode)
+}
+
+function Show-RuleEditor {
+    param($Rule = $null)
+
+    $script:RuleEditorSaved = $false
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = if ($Rule) { 'Edit save rule' } else { 'Add save rule' }
+    $dlg.Size = New-Object System.Drawing.Size(780, 650)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    function New-EditorLabel {
+        param([string]$Text, [int]$X, [int]$Y)
+        $l = New-Object System.Windows.Forms.Label
+        $l.Text = $Text
+        $l.Location = New-Object System.Drawing.Point($X, $Y)
+        $l.Size = New-Object System.Drawing.Size(105, 20)
+        return $l
+    }
+
+    function New-EditorBox {
+        param([int]$X, [int]$Y, [int]$W, [string]$Text = '')
+        $t = New-Object System.Windows.Forms.TextBox
+        $t.Location = New-Object System.Drawing.Point($X, $Y)
+        $t.Size = New-Object System.Drawing.Size($W, 24)
+        $t.Text = $Text
+        return $t
+    }
+
+    $lblName = New-EditorLabel 'Game name' 12 15
+    $tbName = New-EditorBox 120 12 300
+
+    $lblApp = New-EditorLabel 'Steam AppIDs' 12 45
+    $tbApp = New-EditorBox 120 42 300
+
+    $lblAlias = New-EditorLabel 'Aliases' 12 75
+    $tbAlias = New-EditorBox 120 72 620
+
+    $lblInstall = New-EditorLabel 'Install folders' 12 105
+    $tbInstall = New-EditorBox 120 102 620
+
+    $lblFiles = New-EditorLabel 'Save file globs' 12 135
+    $tbFiles = New-EditorBox 120 132 300
+
+    $lblFolders = New-EditorLabel 'Save folder globs' 12 165
+    $tbFolders = New-EditorBox 120 162 300
+
+    $lblMode = New-EditorLabel 'Restore mode' 440 135
+    $cbMode = New-Object System.Windows.Forms.ComboBox
+    $cbMode.Location = New-Object System.Drawing.Point(540, 132)
+    $cbMode.Size = New-Object System.Drawing.Size(200, 24)
+    $cbMode.DropDownStyle = 'DropDownList'
+    [void]$cbMode.Items.AddRange(@('auto', 'token', 'gamedir', 'absolute'))
+    $cbMode.SelectedItem = 'auto'
+
+    $lblNotes = New-EditorLabel 'Notes' 12 195
+    $tbNotes = New-EditorBox 120 192 620
+
+    $lblPaths = New-Object System.Windows.Forms.Label
+    $lblPaths.Text = 'Save locations (folders, wildcards, or %TOKEN% patterns)'
+    $lblPaths.Location = New-Object System.Drawing.Point(12, 230)
+    $lblPaths.Size = New-Object System.Drawing.Size(500, 20)
+
+    $lbPaths = New-Object System.Windows.Forms.ListBox
+    $lbPaths.Location = New-Object System.Drawing.Point(12, 254)
+    $lbPaths.Size = New-Object System.Drawing.Size(600, 230)
+    $lbPaths.HorizontalScrollbar = $true
+
+    $btnAddFolder = New-Object System.Windows.Forms.Button
+    $btnAddFolder.Text = 'Add folder...'
+    $btnAddFolder.Location = New-Object System.Drawing.Point(624, 254)
+    $btnAddFolder.Size = New-Object System.Drawing.Size(130, 30)
+
+    $btnAddPattern = New-Object System.Windows.Forms.Button
+    $btnAddPattern.Text = 'Add pattern...'
+    $btnAddPattern.Location = New-Object System.Drawing.Point(624, 292)
+    $btnAddPattern.Size = New-Object System.Drawing.Size(130, 30)
+
+    $btnRemovePath = New-Object System.Windows.Forms.Button
+    $btnRemovePath.Text = 'Remove'
+    $btnRemovePath.Location = New-Object System.Drawing.Point(624, 330)
+    $btnRemovePath.Size = New-Object System.Drawing.Size(130, 30)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = "Token paths are portable: %LOCALAPPDATA%, %APPDATA%, %DOCUMENTS%, %SAVEDGAMES%, %PUBLICDOCS%, %PROGRAMDATA%, %STEAMUSERDATA%, %GAMEDIR%." + "`r`n" +
+        "Use gamedir mode (or %GAMEDIR%) so the save is restored next to the game found on the new PC."
+    $hint.Location = New-Object System.Drawing.Point(12, 492)
+    $hint.Size = New-Object System.Drawing.Size(740, 40)
+    $hint.ForeColor = [System.Drawing.Color]::DimGray
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = 'Save rule'
+    $btnSave.Location = New-Object System.Drawing.Point(560, 560)
+    $btnSave.Size = New-Object System.Drawing.Size(100, 32)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = 'Cancel'
+    $btnCancel.Location = New-Object System.Drawing.Point(670, 560)
+    $btnCancel.Size = New-Object System.Drawing.Size(80, 32)
+
+    $dlg.AcceptButton = $btnSave
+    $dlg.CancelButton = $btnCancel
+
+    $paths = New-Object System.Collections.Generic.List[object]
+
+    # Pre-fill when editing.
+    if ($Rule) {
+        $tbName.Text = [string]$Rule.Name
+        $tbApp.Text = (@($Rule.SteamAppIds) -join ', ')
+        $tbAlias.Text = (@($Rule.Aliases) -join ', ')
+        $tbInstall.Text = (@($Rule.InstallDirNames) -join ', ')
+        $tbFiles.Text = (@($Rule.FilePatterns) -join ', ')
+        $tbFolders.Text = (@($Rule.FolderPatterns) -join ', ')
+        $tbNotes.Text = [string]$Rule.Notes
+        if ($Rule.Paths -and @($Rule.Paths).Count -gt 0) {
+            $first = @($Rule.Paths)[0]
+            $m = if ($first -is [string]) { 'auto' } else { [string]$first.Mode }
+            if ($m -and $cbMode.Items.Contains($m)) { $cbMode.SelectedItem = $m }
+        }
+        foreach ($p in @($Rule.Paths)) {
+            $paths.Add($p)
+            [void]$lbPaths.Items.Add((Format-RulePathEntry $p))
+        }
+    }
+
+    $getInstallNames = {
+        @($tbInstall.Text -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+
+    $btnAddFolder.Add_Click({
+        $folder = Select-Folder 'Select a save folder for this game' $env:USERPROFILE
+        if (-not $folder) { return }
+        $install = & $getInstallNames
+        if (-not $install -or @($install).Count -eq 0) { $install = @($tbName.Text.Trim()) }
+        $obj = ConvertTo-GSVRulePathEntry -Path $folder -Mode ([string]$cbMode.SelectedItem) -InstallDirNames $install
+        if ($obj) {
+            $paths.Add($obj)
+            [void]$lbPaths.Items.Add((Format-RulePathEntry $obj))
+        }
+    })
+
+    $btnAddPattern.Add_Click({
+        $p = Read-GuiText 'Add save path pattern' "Enter a folder / wildcard pattern.`nExamples: %LOCALAPPDATA%\MyGame\Saved   or   D:\Games\MyGame\Saves   or   %APPDATA%\GSE Saves\1234" '%LOCALAPPDATA%\MyGame\Saved'
+        if (-not $p) { return }
+        $install = & $getInstallNames
+        if (-not $install -or @($install).Count -eq 0) { $install = @($tbName.Text.Trim()) }
+        $obj = ConvertTo-GSVRulePathEntry -Path $p -Mode ([string]$cbMode.SelectedItem) -InstallDirNames $install
+        if ($obj) {
+            $paths.Add($obj)
+            [void]$lbPaths.Items.Add((Format-RulePathEntry $obj))
+        }
+    })
+
+    $btnRemovePath.Add_Click({
+        if ($lbPaths.SelectedIndex -lt 0) { return }
+        $i = $lbPaths.SelectedIndex
+        $paths.RemoveAt($i)
+        $lbPaths.Items.RemoveAt($i)
+    })
+
+    $btnSave.Add_Click({
+        $name = $tbName.Text.Trim()
+        if (-not $name) { Show-Warn 'Game name is required.'; return }
+        if ($paths.Count -eq 0) { Show-Warn 'Add at least one save folder or pattern.'; return }
+
+        $splitList = {
+            param([string]$Text)
+            @($Text -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        }
+
+        $appIds = & $splitList $tbApp.Text
+        $aliases = & $splitList $tbAlias.Text
+        $install = & $splitList $tbInstall.Text
+        if (-not $install -or @($install).Count -eq 0) { $install = @($name) }
+        $files = & $splitList $tbFiles.Text
+        $folders = & $splitList $tbFolders.Text
+
+        $patterns = @()
+        foreach ($p in $paths) { $patterns += (if ($p -is [string]) { [string]$p } else { [string]$p.Pattern }) }
+
+        try {
+            $null = Save-GSVRule -Name $name -Paths $patterns -FilePatterns $files -FolderPatterns $folders `
+                -Aliases $aliases -SteamAppIds $appIds -InstallDirNames $install `
+                -Mode ([string]$cbMode.SelectedItem) -Notes $tbNotes.Text
+            $script:RuleEditorSaved = $true
+            $dlg.Close()
+        } catch {
+            Show-Error "Could not save the rule: $($_.Exception.Message)"
+        }
+    })
+
+    $btnCancel.Add_Click({ $dlg.Close() })
+
+    $dlg.Controls.AddRange(@(
+        $lblName, $tbName, $lblApp, $tbApp, $lblAlias, $tbAlias, $lblInstall, $tbInstall,
+        $lblFiles, $tbFiles, $lblFolders, $tbFolders, $lblMode, $cbMode, $lblNotes, $tbNotes,
+        $lblPaths, $lbPaths, $btnAddFolder, $btnAddPattern, $btnRemovePath, $hint, $btnSave, $btnCancel
+    ))
+
+    [void]$dlg.ShowDialog()
+    $dlg.Dispose()
+    return [bool]$script:RuleEditorSaved
+}
+
+function Show-RulesDialog {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Save rules - portable save locations (config\save-rules.json)'
+    $dlg.Size = New-Object System.Drawing.Size(980, 620)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.Location = New-Object System.Drawing.Point(12, 12)
+    $lv.Size = New-Object System.Drawing.Size(940, 330)
+    $lv.View = 'Details'
+    $lv.FullRowSelect = $true
+    $lv.GridLines = $false
+    $lv.HideSelection = $false
+    $lv.MultiSelect = $false
+
+    [void]$lv.Columns.Add('Game', 230)
+    [void]$lv.Columns.Add('AppIDs', 110)
+    [void]$lv.Columns.Add('Paths', 60, [System.Windows.Forms.HorizontalAlignment]::Center)
+    [void]$lv.Columns.Add('Install folder names', 200)
+    [void]$lv.Columns.Add('Save patterns', 300)
+
+    $detail = New-Object System.Windows.Forms.TextBox
+    $detail.Location = New-Object System.Drawing.Point(12, 352)
+    $detail.Size = New-Object System.Drawing.Size(940, 160)
+    $detail.Multiline = $true
+    $detail.ReadOnly = $true
+    $detail.ScrollBars = 'Vertical'
+    $detail.Font = New-Object System.Drawing.Font('Consolas', 9)
+
+    $btnAdd = New-Object System.Windows.Forms.Button
+    $btnAdd.Text = 'Add rule...'
+    $btnAdd.Location = New-Object System.Drawing.Point(12, 524)
+    $btnAdd.Size = New-Object System.Drawing.Size(100, 32)
+
+    $btnEdit = New-Object System.Windows.Forms.Button
+    $btnEdit.Text = 'Edit...'
+    $btnEdit.Location = New-Object System.Drawing.Point(120, 524)
+    $btnEdit.Size = New-Object System.Drawing.Size(80, 32)
+
+    $btnRemove = New-Object System.Windows.Forms.Button
+    $btnRemove.Text = 'Remove'
+    $btnRemove.Location = New-Object System.Drawing.Point(208, 524)
+    $btnRemove.Size = New-Object System.Drawing.Size(80, 32)
+
+    $btnDiscover = New-Object System.Windows.Forms.Button
+    $btnDiscover.Text = 'Discover now'
+    $btnDiscover.Location = New-Object System.Drawing.Point(296, 524)
+    $btnDiscover.Size = New-Object System.Drawing.Size(110, 32)
+
+    $btnExport = New-Object System.Windows.Forms.Button
+    $btnExport.Text = 'Export...'
+    $btnExport.Location = New-Object System.Drawing.Point(414, 524)
+    $btnExport.Size = New-Object System.Drawing.Size(90, 32)
+
+    $btnImport = New-Object System.Windows.Forms.Button
+    $btnImport.Text = 'Import...'
+    $btnImport.Location = New-Object System.Drawing.Point(512, 524)
+    $btnImport.Size = New-Object System.Drawing.Size(90, 32)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = 'Close'
+    $btnClose.Location = New-Object System.Drawing.Point(872, 524)
+    $btnClose.Size = New-Object System.Drawing.Size(80, 32)
+
+    $status = New-Object System.Windows.Forms.Label
+    $status.Location = New-Object System.Drawing.Point(614, 532)
+    $status.Size = New-Object System.Drawing.Size(250, 20)
+    $status.ForeColor = [System.Drawing.Color]::DimGray
+
+    function Refresh-RuleList {
+        $lv.BeginUpdate()
+        $lv.Items.Clear()
+        $rules = @(Get-GSVRules -Refresh)
+        foreach ($r in $rules) {
+            $item = New-Object System.Windows.Forms.ListViewItem([string]$r.Name)
+            [void]$item.SubItems.Add((@($r.SteamAppIds) -join ', '))
+            [void]$item.SubItems.Add([string](@($r.Paths).Count))
+            [void]$item.SubItems.Add((@($r.InstallDirNames) -join ', '))
+            [void]$item.SubItems.Add((@($r.FilePatterns) -join ', '))
+            $item.Tag = $r
+            [void]$lv.Items.Add($item)
+        }
+        $lv.EndUpdate()
+        $status.Text = ('{0} rule(s)' -f $rules.Count)
+    }
+
+    $showDetail = {
+        if ($lv.SelectedItems.Count -eq 0) { $detail.Text = ''; return }
+        $r = $lv.SelectedItems[0].Tag
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add(('Game       : {0}' -f $r.Name))
+        $lines.Add(('Rule id    : {0}' -f $r.Id))
+        if (@($r.Aliases).Count -gt 0) { $lines.Add(('Aliases    : {0}' -f (@($r.Aliases) -join ', '))) }
+        if (@($r.SteamAppIds).Count -gt 0) { $lines.Add(('AppIDs     : {0}' -f (@($r.SteamAppIds) -join ', '))) }
+        if (@($r.InstallDirNames).Count -gt 0) { $lines.Add(('Install dir: {0}' -f (@($r.InstallDirNames) -join ', '))) }
+        if (@($r.FilePatterns).Count -gt 0) { $lines.Add(('Save files : {0}' -f (@($r.FilePatterns) -join ', '))) }
+        if (@($r.FolderPatterns).Count -gt 0) { $lines.Add(('Save folders: {0}' -f (@($r.FolderPatterns) -join ', '))) }
+        if ($r.Notes) { $lines.Add(('Notes      : {0}' -f $r.Notes)) }
+        $lines.Add('')
+        $lines.Add('Paths:')
+        foreach ($p in @($r.Paths)) { $lines.Add('  - ' + (Format-RulePathEntry $p)) }
+        $detail.Text = ($lines -join "`r`n")
+    }
+
+    $lv.Add_SelectedIndexChanged($showDetail)
+
+    $btnAdd.Add_Click({
+        if (Show-RuleEditor) {
+            Refresh-RuleList
+            Load-Games
+        }
+    })
+
+    $btnEdit.Add_Click({
+        if ($lv.SelectedItems.Count -eq 0) { Show-Warn 'Select a rule first.'; return }
+        if (Show-RuleEditor -Rule $lv.SelectedItems[0].Tag) {
+            Refresh-RuleList
+            Load-Games
+        }
+    })
+
+    $btnRemove.Add_Click({
+        if ($lv.SelectedItems.Count -eq 0) { Show-Warn 'Select a rule first.'; return }
+        $r = $lv.SelectedItems[0].Tag
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "Remove the save rule '$($r.Name)'?`n`nThe backup snapshots are not touched.",
+            'Remove rule', [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -ne 'Yes') { return }
+        $null = Remove-GSVRule -Id $r.Id
+        Refresh-RuleList
+        Load-Games
+    })
+
+    $btnDiscover.Add_Click({
+        $all = New-Object System.Collections.Generic.List[object]
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($r in @(Get-GSVRules)) {
+            $locs = @(Resolve-GSVRulePaths -Rule $r -NoSize)
+            $dir = Find-GSVRuleGameDir -Names @($r.InstallDirNames)
+            $lines.Add(('{0}: {1} save(s){2}' -f $r.Name, $locs.Count, $(if ($dir) { '  [installed: ' + $dir + ']' } else { '  [install folder not found]' })))
+            foreach ($l in $locs) { $lines.Add('    ' + $l.ResolvedPath); $all.Add($l) }
+        }
+        if ($lines.Count -eq 0) { $lines.Add('No rules defined yet.') }
+        $msg = "Discovered $($all.Count) save folder(s).`n`n" + (($lines | Select-Object -First 30) -join "`n")
+        Show-Info $msg 'Discover save rules'
+        if ($all.Count -gt 0) { Load-Games }
+    })
+
+    $btnExport.Add_Click({
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Title = 'Export save rules'
+        $sfd.Filter = 'JSON files (*.json)|*.json|All files (*.*)|*.*'
+        $sfd.FileName = 'save-rules.json'
+        if ($sfd.ShowDialog() -eq 'OK') {
+            try {
+                $p = Export-GSVRules -Path $sfd.FileName
+                Show-Info "Exported to:`n$p"
+            } catch { Show-Error "Export failed: $($_.Exception.Message)" }
+        }
+    })
+
+    $btnImport.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Title = 'Import save rules'
+        $ofd.Filter = 'JSON files (*.json)|*.json|All files (*.*)|*.*'
+        if ($ofd.ShowDialog() -eq 'OK') {
+            try {
+                $n = Import-GSVRules -Path $ofd.FileName
+                Refresh-RuleList
+                Load-Games
+                Show-Info "Imported $n rule(s)."
+            } catch { Show-Error "Import failed: $($_.Exception.Message)" }
+        }
+    })
+
+    $btnClose.Add_Click({ $dlg.Close() })
+
+    $dlg.Controls.AddRange(@($lv, $detail, $btnAdd, $btnEdit, $btnRemove, $btnDiscover, $btnExport, $btnImport, $btnClose, $status))
+
+    Refresh-RuleList
+    [void]$dlg.ShowDialog()
+    $dlg.Dispose()
+}
+
+#endregion
+
 #endregion
 
 #region ---------------------------------------------------------------- form
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'GameSaveVault  -  game save backup & restore'
-$form.Size = New-Object System.Drawing.Size(1120, 700)
-$form.MinimumSize = New-Object System.Drawing.Size(900, 520)
+$form.Size = New-Object System.Drawing.Size(1240, 720)
+$form.MinimumSize = New-Object System.Drawing.Size(1000, 560)
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
 $top = New-Object System.Windows.Forms.FlowLayoutPanel
 $top.Dock = 'Top'
-$top.Height = 46
+$top.Height = 84
 $top.Padding = New-Object System.Windows.Forms.Padding(8, 8, 8, 4)
-$top.WrapContents = $false
+$top.WrapContents = $true
 $top.AutoSize = $false
 
 function New-TopButton {
@@ -549,11 +965,12 @@ $btnOld      = New-TopButton 'Windows.old...' 120 'Recover saves from C:\Windows
 $btnDeep     = New-TopButton 'Deep scan...' 110 'Search a whole drive for CPY / GSE / scene / Steam / UWP saves'
 $btnMigrate  = New-TopButton 'Migrate...' 90 'Copy console-emulator saves between emulators (Eden / Ryujinx / Eglantine / Kyty)'
 $btnAdd      = New-TopButton 'Add game...' 100 'Register a custom save folder'
+$btnRules    = New-TopButton 'Save rules...' 110 'Manage the portable save-location database (config\save-rules.json)'
 $btnVault    = New-TopButton 'Open vault' 100 'Open the backup folder'
 $btnVaultLoc = New-TopButton 'Backup location...' 150 'Choose where backups are stored (default vault folder)'
 $btnDoctor   = New-TopButton 'Doctor' 80 'Check vault health'
 
-$top.Controls.AddRange(@($btnScan, $btnBackup, $btnBackupAll, $btnRestore, $btnOld, $btnDeep, $btnMigrate, $btnAdd, $btnVault, $btnVaultLoc, $btnDoctor))
+$top.Controls.AddRange(@($btnScan, $btnBackup, $btnBackupAll, $btnRestore, $btnOld, $btnDeep, $btnMigrate, $btnAdd, $btnRules, $btnVault, $btnVaultLoc, $btnDoctor))
 
 $list = New-Object System.Windows.Forms.ListView
 $list.Dock = 'Fill'
@@ -760,8 +1177,30 @@ $btnRestore.Add_Click({
     $snap = Select-SnapshotDialog
     if (-not $snap) { return }
 
+    # --- where to restore? choose a format (and a folder for "folder" format)
+    $format = Read-GuiText 'Restore location' "Restore to:`n  profile    = current Windows profile (default)`n  verbatim   = the original C: layout, exactly as saved`n  folder     = the folder you pick below, keeping <TOKEN>\<path> structure`nType one:" 'profile'
+    if (-not $format) { return }
+
+    $restoreRoot = ''
+    $restoreFormat = $format.Trim().ToLowerInvariant()
+
+    if ($restoreFormat -eq 'folder') {
+        $restoreRoot = Select-Folder 'Choose the folder every save should be copied into'
+        if (-not $restoreRoot) { return }
+    }
+
+    $restoreWhat = if ($restoreFormat -eq 'profile') { 'your current Windows profile' }
+        elseif ($restoreFormat -eq 'verbatim') { 'the original drive layout (verbatim, e.g. back to C:)' }
+        elseif ($restoreFormat -eq 'folder') { "the folder:`n$restoreRoot`n(keeps the <TOKEN>\<path> structure)" }
+        else { $null }
+
+    if (-not $restoreWhat) {
+        Show-Warn "Unknown restore format: $format. Use profile, verbatim or folder."
+        return
+    }
+
     $answer = [System.Windows.Forms.MessageBox]::Show(
-        "Restore this snapshot?`n`n$($snap.Name)`nEntries: $($snap.EntryCount)`nFiles: $($snap.TotalFiles)`n`nExisting saves are moved to the vault's rollback folder first.",
+        "Restore this snapshot?`n`n$($snap.Name)`nEntries: $($snap.EntryCount)`nFiles: $($snap.TotalFiles)`n`nRestore to:`n$restoreWhat`n`nExisting saves are moved to the vault's rollback folder first.",
         'Confirm restore',
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Question)
@@ -773,8 +1212,8 @@ $btnRestore.Add_Click({
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
-        $r = Restore-GSVSnapshot -BackupRoot $script:Vault -Snapshot $snap.Path
-        $msg = "Restore complete.`n`nRestored: $($r.Restored)`nRegistry keys: $($r.Registry)`nSkipped: $($r.Skipped)`nFailed: $($r.Failed)"
+        $r = Restore-GSVSnapshot -BackupRoot $script:Vault -Snapshot $snap.Path -RestoreFormat $restoreFormat -RestoreRoot $restoreRoot
+        $msg = "Restore complete.`n`nRestored: $($r.Restored)`nRegistry keys: $($r.Registry)`nSkipped: $($r.Skipped)`nFailed: $($r.Failed)`nFormat: $($r.Format)"
         if (@($r.Messages).Count -gt 0) {
             $msg += "`n`nDetails:`n" + (($r.Messages | Select-Object -First 8) -join "`n")
         }
@@ -830,26 +1269,14 @@ $btnOld.Add_Click({
 })
 
 $btnAdd.Add_Click({
-    $name = Read-GuiText 'Add a game' 'Game name (as you want it to appear):'
-    if (-not $name) { return }
-
-    $folder = Select-Folder 'Select the save folder for this game'
-    if (-not $folder) { return }
-
-    try {
-        # Merge with an existing custom entry of the same name.
-        $existingPaths = @()
-        $custom = @(Get-GSVCustomGames)
-        $match = $custom | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-        if ($match) { $existingPaths = @($match.Paths) }
-
-        $paths = @($existingPaths + $folder | Select-Object -Unique)
-        $entry = Save-GSVCustomGame -Name $name -Paths $paths -Notes 'Added from GUI'
-        Show-Info "Saved '$($entry.Name)' with $($paths.Count) save path(s).`nIt is included in the next backup."
+    if (Show-RuleEditor) {
+        Show-Info "Save rule stored in config\save-rules.json.`n`nIt is included in the next scan / backup, and restore will use it on a new PC."
         Load-Games
-    } catch {
-        Show-Error "Could not add the game: $($_.Exception.Message)"
     }
+})
+
+$btnRules.Add_Click({
+    Show-RulesDialog
 })
 
 $btnVault.Add_Click({

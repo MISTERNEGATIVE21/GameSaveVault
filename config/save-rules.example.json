@@ -1,0 +1,51 @@
+{
+  "$schema": "../data/save-rules.schema.json",
+  "schemaVersion": 1,
+  "updatedUtc": "2026-11-06T00:00:00.0000000Z",
+  "rules": [
+    {
+      "id": "rule-jump-force",
+      "name": "JUMP FORCE",
+      "aliases": ["Jump Force", "JumpForce", "JUMP FORCE Deluxe Edition"],
+      "steamAppIds": ["816020"],
+      "installDirNames": ["JUMP FORCE"],
+      "filePatterns": ["*.sav", "*.dat", "*.slot", "jfsavedata.dat"],
+      "folderPatterns": ["*save*", "SaveGames", "Saved"],
+      "engine": "Unreal Engine 4",
+      "notes": "Retail/Steam save under LocalAppData; CODEX/GSE/Goldberg copies live in the scene folders.",
+      "discover": true,
+      "source": "builtin",
+      "paths": [
+        { "pattern": "%LOCALAPPDATA%\\JUMP FORCE\\Saved\\SaveGames", "mode": "token", "note": "normal game saves" },
+        { "pattern": "%STEAMUSERDATA%\\816020", "mode": "token", "note": "Steam userdata (account id is remapped on restore)" },
+        { "pattern": "%PUBLICDOCS%\\Steam\\CODEX\\816020", "mode": "token", "note": "CODEX crack" },
+        { "pattern": "%APPDATA%\\GSE Saves\\816020", "mode": "token", "note": "GSE / Goldberg emu" },
+        { "pattern": "%APPDATA%\\Goldberg SteamEmu Saves\\816020", "mode": "token", "note": "Goldberg emu" },
+        { "pattern": "%GAMEDIR%\\Saved\\SaveGames", "mode": "gamedir", "note": "portable install" }
+      ]
+    },
+    {
+      "id": "rule-007-first-light",
+      "name": "007 First Light",
+      "aliases": ["James Bond 007 First Light", "First Light"],
+      "steamAppIds": ["3768760"],
+      "installDirNames": ["007 First Light", "007 First Light Retail"],
+      "filePatterns": ["*.sav", "*.dat", "*.json", "*.profile"],
+      "folderPatterns": ["*save*", "SaveGames", "profiles", "userdata"],
+      "engine": "Glacier 2",
+      "notes": "IO Interactive: Epic path has a per-account id subfolder, so the wildcard is intentional.",
+      "discover": true,
+      "source": "builtin",
+      "paths": [
+        { "pattern": "%APPDATA%\\IO Interactive\\Epic\\*", "mode": "token", "note": "Epic per-account folder" },
+        { "pattern": "%APPDATA%\\IO Interactive\\007 First Light", "mode": "token", "note": "normal saves" },
+        { "pattern": "%LOCALAPPDATA%\\IO Interactive\\007 First Light", "mode": "token", "note": "settings + saves" },
+        { "pattern": "%STEAMUSERDATA%\\3768760", "mode": "token", "note": "Steam userdata" },
+        { "pattern": "%APPDATA%\\GSE Saves\\3768760", "mode": "token", "note": "GSE emu" },
+        { "pattern": "%APPDATA%\\Goldberg SteamEmu Saves\\3768760", "mode": "token", "note": "Goldberg emu" },
+        { "pattern": "%PUBLICDOCS%\\Steam\\CODEX\\3768760", "mode": "token", "note": "CODEX crack" },
+        { "pattern": "%DOCUMENTS%\\CPY_SAVES\\3768760", "mode": "token", "note": "CPY crack" }
+      ]
+    }
+  ]
+}

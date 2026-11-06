@@ -91,7 +91,7 @@ Or run `Install.ps1` once to create a desktop / Start-menu shortcut:
 powershell -ExecutionPolicy Bypass -File .\Install.ps1
 ```
 
-The GUI shows every detected game with a checkbox, the save folders it found, and buttons for **Backup selected**, **Backup all**, **Restore…**, **Windows.old…**, **Deep scan…**, **Add game…**, **Open vault**, **Backup location…** and **Doctor**. Double-click a row to open its save folder.
+The GUI shows every detected game with a checkbox, the save folders it found, and buttons for **Backup selected**, **Backup all**, **Restore…**, **Windows.old…**, **Deep scan…**, **Migrate…**, **Add game…**, **Save rules…**, **Open vault**, **Backup location…** and **Doctor**. Double-click a row to open its save folder.
 
 #### Choosing where backups are stored
 
@@ -127,6 +127,11 @@ powershell -ExecutionPolicy Bypass -File .\Install.ps1 -ScheduledTask -Time 21:3
 | `snapshots` | List snapshots with date, size, file count and errors. |
 | `stats` | Vault size and free space. |
 | `add` | Register a custom game and save path(s). |
+| `rules` | List the portable save rules in `config\save-rules.json`. |
+| `rule-add` | Add / update a save rule: `-Paths`, `-SavePattern`, `-Alias`, `-InstallDir`, `-Mode`. |
+| `rule-remove` | Remove a rule by name or id. |
+| `rule-import` / `rule-export` | Move rules between machines as JSON (`-File rules.json`). |
+| `discover` | Find the games and saves described by the rules on **this** PC (`-Backup` snapshots them). |
 | `prune` | Delete old snapshots (`-Keep <n>`). |
 | `doctor` | Check vault location, write access, Windows.old, catalog and game detection. |
 | `gui` | Launch the graphical app. |
@@ -145,9 +150,16 @@ Common switches:
 -Drive C: -AllDrives             # deep-scan only: which drive(s) to search
 -MaxDepth 12 -MaxResults 500     # deep-scan only: folder depth and hit limit
 -NoSize                         # deep-scan only: skip file counting (much faster)
--Backup                         # deep-scan only: snapshot everything found
+-Backup                         # deep-scan / discover: snapshot everything found
 -From / -To <emu>               # migrate only: eden, eglantine, ryujinx, kyty, shadps4
 -Title <id>                     # migrate only: one title id (0100… or PPSA…)
+-RestoreFormat profile|verbatim|folder   # restore layout (default: profile)
+-RestoreRoot <folder>           # folder format: <folder>\<TOKEN>\<relative path>
+-SavePattern *.sav,*.dat        # rule-add: which files are saves
+-InstallDir "My Game"           # rule-add: install folder name(s) used to find the game
+-Mode auto|token|gamedir|absolute        # rule-add: restore strategy
+-Alias "Alternative name"       # rule-add: extra name for game matching
+-File rules.json                # rule-import / rule-export
 ```
 
 Examples:
@@ -179,6 +191,16 @@ Examples:
 
 # registry-stored settings too
 .\GameSaveVault.ps1 add "My Game" -Paths "%DOCUMENTS%\MyGame" -Registry "HKCU\Software\MyGame"
+
+# save rules: portable paths that survive a new drive letter / new Windows user
+.\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav -InstallDir "My Game"
+.\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GSE Saves\1234" -SavePattern *.sav,*.dat
+.\GameSaveVault.ps1 discover -Backup
+.\GameSaveVault.ps1 rule-export -File D:\rules.json
+
+# restore layouts: new profile (default), original absolute layout, or one folder
+.\GameSaveVault.ps1 restore -Snapshot latest -RestoreFormat verbatim
+.\GameSaveVault.ps1 restore -Snapshot latest -RestoreFormat folder -RestoreRoot D:\RestoredSaves
 ```
 
 ---
@@ -298,16 +320,98 @@ For every installed game the tool combines:
 2. **Epic** — reads the Epic manifest `.item` files.
 3. **GOG** — reads the GOG registry entries.
 4. **Folder scan** — looks in `GameScanRoots` (defaults: `D:\Games`, Epic folder, Steam `steamapps\common`, common GOG/Ubisoft/EA paths) and detects real game folders by `.exe`/engine markers.
-5. **Catalog** — 89 curated games with exact save paths, matched by Steam AppID, name and aliases.
+5. **Catalog** — 96 curated games with exact save paths, matched by Steam AppID, name and aliases.
 6. **Heuristics** — for unknown games it checks:
    - `Documents\My Games\<name>`, `Documents\<name>`, `Saved Games\<name>`, `AppData\<name>`, `LocalAppData\<name>`
    - `LocalLow\<company>\<product>` (Unity)
    - `Save`/`Saves`/`SaveData`/`Profile`/`Profiles` inside the install folder
    - Steam userdata for the game's AppID
    - Goldberg / SmartSteamEmu / CODEX / RUNE / ALI213 / EMPRESS folders
-7. **Name matching** strips repack tags, version numbers and edition words, then compares word tokens (so `Skyrim Special Edition` matches `The Elder Scrolls V: Skyrim Special Edition`).
+7. **Save rules** — your own entries from `config\save-rules.json` (see below). A rule can add paths the catalog does not know, and it carries the restore strategy.
+8. **Name matching** strips repack tags, version numbers and edition words, then compares word tokens (so `Skyrim Special Edition` matches `The Elder Scrolls V: Skyrim Special Edition`).
 
 If a game is missing, add its folder to `GameScanRoots` in `config\settings.json`, or register the save path directly with `add`.
+
+---
+
+## Save rules (portable save locations)
+
+The catalog covers popular games, but repacks, obscure titles and cracks often keep saves somewhere else. A **save rule** is a small JSON record that tells the tool:
+
+- **where** the game keeps saves (as `%TOKEN%` patterns, not hard-coded `C:\Users\<old user>\...`),
+- **how** to find the game again on a new PC (`installDirNames`),
+- **what** save files / folders look like (`filePatterns`, `folderPatterns`) so it can search the install folder when the exact path changed,
+- **how** to restore the files (`token`, `gamedir`, `absolute`, `auto`).
+
+Rules live in `config\save-rules.json`. The format is documented by [`data/save-rules.schema.json`](data/save-rules.schema.json), and a couple of ready-made examples are in `config\save-rules.example.json` (they are copied into your DB on first use).
+
+### Path tokens
+
+| Token | Expands to |
+|---|---|
+| `%USERPROFILE%` | the current Windows profile |
+| `%APPDATA%` / `%LOCALAPPDATA%` / `%LOCALLOW%` | Roaming / Local / LocalLow |
+| `%DOCUMENTS%` / `%SAVEDGAMES%` | Documents (including OneDrive redirection) / Saved Games |
+| `%PUBLIC%` / `%PUBLICDOCS%` / `%PROGRAMDATA%` | shared machine folders |
+| `%STEAMUSERDATA%` | the Steam `userdata` folder (account id is remapped on restore) |
+| `%GAMEDIR%` | the game install folder discovered on **this** machine |
+
+Wildcards `*` and `?` are allowed, so `%APPDATA%\IO Interactive\Epic\*` matches a per-account subfolder.
+
+### Restore modes
+
+| Mode | What restore does |
+|---|---|
+| `token` | Expands the token in the **new** profile, so saves follow the new Windows user. |
+| `gamedir` | Finds the game install on the new PC (Steam library, `GameScanRoots`, `D:\Games`, repack folders, shallow drive walk) and writes the save **next to the game**. |
+| `absolute` | Writes to the original absolute path (useful for portable emulators on another drive). |
+| `auto` | `token` when the path sits under a known folder, `gamedir` when it sits inside the install. |
+
+If a `gamedir` rule cannot find the game, restore falls back to the token view instead of failing.
+
+### CLI
+
+```powershell
+# add a rule from an absolute path: it is converted to %GAMEDIR% or %TOKEN%
+.\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav -InstallDir "My Game"
+
+# token paths and emulator/crack folders are kept as written
+.\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GSE Saves\1234" -SavePattern *.sav,*.dat
+
+# see what each rule finds on this PC (and optionally snapshot it)
+.\GameSaveVault.ps1 discover
+.\GameSaveVault.ps1 discover -Backup
+
+# share rules with another machine
+.\GameSaveVault.ps1 rule-export -File D:\rules.json
+.\GameSaveVault.ps1 rule-import -File D:\rules.json
+.\GameSaveVault.ps1 rules
+```
+
+### GUI
+
+**Save rules…** opens the rules manager. From there you can add/edit/remove rules, pick save folders with a folder browser or type a pattern, choose the restore mode, run **Discover now**, and import/export JSON. **Add game…** opens the same editor, so a manually added game is a portable rule rather than a one-off path.
+
+### Example rule
+
+```json
+{
+  "id": "rule-my-game",
+  "name": "My Game",
+  "aliases": ["MyGame"],
+  "steamAppIds": ["1234567"],
+  "installDirNames": ["My Game", "MyGame"],
+  "filePatterns": ["*.sav", "*.dat"],
+  "folderPatterns": ["*save*", "SaveGames"],
+  "discover": true,
+  "paths": [
+    { "pattern": "%LOCALAPPDATA%\\My Game\\Saved\\SaveGames", "mode": "token" },
+    { "pattern": "%GAMEDIR%\\Saves", "mode": "gamedir" }
+  ]
+}
+```
+
+On a fresh Windows install, `%LOCALAPPDATA%` becomes the new user's folder, and `%GAMEDIR%` is resolved by looking for the game again. Snapshots record `RuleId`, `RestoreMode`, `InstallDirNames` and `FilePatterns`, so the restore decision does not depend on the old machine.
 
 ---
 
@@ -363,6 +467,8 @@ G:\GameSaveVault\
 
 Custom games live in `config\games.custom.json` and are created by `add` / **Add game…**.
 
+Portable save rules live in `config\save-rules.json`. The file is validated by `data\save-rules.schema.json`; `config\save-rules.example.json` seeds it on first use. Rules are plain JSON, so you can edit or commit them, and `rule-import` / `rule-export` move them between machines.
+
 ---
 
 ## Troubleshooting
@@ -371,7 +477,9 @@ Custom games live in `config\games.custom.json` and are created by `add` / **Add
 |---|---|
 | `running scripts is disabled` | Use `powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 ...` or run `Install.ps1` once. |
 | "No installed games detected" | Add your game folder to `GameScanRoots` or use `add "Game" -Paths "..."`. |
-| A game shows 0 save folders | The game may not have been launched yet, or saves are in an unusual place. Run `scan -Detailed`, then `add`. |
+| A game shows 0 save folders | The game may not have been launched yet, or saves are in an unusual place. Run `scan -Detailed`, then `add` or `rule-add`. |
+| A repack / crack save is still missing | Add a rule with `rule-add "Game" -Paths "D:\Games\Game\Saves" -SavePattern *.sav -InstallDir "Game"`, then run `discover`. |
+| Restore put saves in the wrong place | Use `-RestoreFormat profile` (new user, default), `verbatim` (original absolute path) or `folder -RestoreRoot <dir>`. |
 | Vault is on C: | `doctor` warns about this. Move it: `backup -BackupRoot D:\GameSaveVault`, then edit `settings.json`. |
 | Windows.old is gone | Windows deletes it after ~10 days. Only a vault backup can help after that. |
 | Documents is redirected to OneDrive | The tool resolves the real Documents known-folder and also checks `OneDrive\Documents` in Windows.old. |
@@ -394,6 +502,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\selftest-windowsold.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\selftest-deepscan.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\selftest-newos.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\selftest-emulators.ps1
+powershell -ExecutionPolicy Bypass -File .\tests\selftest-formats.ps1
+powershell -ExecutionPolicy Bypass -File .\tests\selftest-rules.ps1
 ```
 
 ---
@@ -410,8 +520,11 @@ GameSaveVault\
     GSV.Core.psm1                discovery, tokens, catalog, Windows.old scan
     GSV.Vault.psm1               snapshot, restore, rollback, pruning
   data\catalog.psd1              96 curated games and save paths
+  data\save-rules.schema.json    JSON Schema for config\save-rules.json
   config\settings.json           generated on first run (git-ignored)
   config\settings.example.json   sample settings
+  config\save-rules.json         your save rules (generated / editable)
+  config\save-rules.example.json seeded example rules
   config\games.custom.json       generated when you add games
   tests\
     selftest.ps1                 backup + restore round-trip
@@ -419,6 +532,8 @@ GameSaveVault\
     selftest-newos.ps1           Steam AppId scan -> save -> restore to a new OS
     selftest-deepscan.ps1        CPY/GSE/Goldberg/scene/UWP deep scan
     selftest-emulators.ps1       Eden / Ryujinx / Eglantine / Kyty (_SaveData) / shadPS4 scan + migrate
+    selftest-formats.ps1         profile / verbatim / folder restore formats
+    selftest-rules.ps1           tokenize -> save -> discover -> new-PC restore -> import/export
   .gitignore
   LICENSE
 ```

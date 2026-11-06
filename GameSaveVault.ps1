@@ -38,6 +38,8 @@ param(
 
     [string[]]$Registry = @(),
 
+    [string[]]$Directory = @(),
+
     [string[]]$Drive = @(),
 
     [int]$MaxDepth = 10,
@@ -50,7 +52,25 @@ param(
 
     [string]$To = '',
 
+    [string]$RestoreFormat = 'profile',
+
+    [string]$RestoreRoot = '',
+
     [string[]]$Title = @(),
+
+    [Alias('Pattern','Patterns','SavePatterns')]
+    [string[]]$SavePattern = @(),
+
+    [string[]]$Alias = @(),
+
+    [string[]]$InstallDir = @(),
+
+    [ValidateSet('auto','token','gamedir','absolute')]
+    [string]$Mode = 'auto',
+
+    [string]$Notes = '',
+
+    [string]$File = '',
 
     [int]$Keep = 0,
 
@@ -259,8 +279,29 @@ function Invoke-Restore {
     if (-not (Test-Path -LiteralPath $vault)) { throw "Vault not found: $vault" }
     if ($isDryRun) { Write-Host '  DRY RUN - nothing will be changed.' -ForegroundColor Yellow }
 
+    $fmt = if ($RestoreFormat) { $RestoreFormat.ToLowerInvariant() } else { 'profile' }
+    if ($fmt -notin @('profile', 'verbatim', 'folder')) {
+        throw "Unknown -RestoreFormat '$RestoreFormat'. Use profile, verbatim or folder."
+    }
+    if ($fmt -eq 'folder' -and -not $RestoreRoot) {
+        throw '-RestoreRoot is required with -RestoreFormat folder (the folder every save is copied into).'
+    }
+
+    if (-not $Quiet) {
+        Write-Kv 'Restore format' $fmt
+        if ($fmt -eq 'verbatim') {
+            Write-Host '  Saves are written back exactly where they were stored (the original drive layout, e.g. C:).' -ForegroundColor DarkGray
+        } elseif ($fmt -eq 'folder') {
+            Write-Kv 'Into folder' $RestoreRoot 'Yellow'
+            Write-Host '  Entries keep their format: <folder>\<TOKEN>\<relative path>.' -ForegroundColor DarkGray
+        } else {
+            Write-Host '  Saves are written into the current user profile.' -ForegroundColor DarkGray
+        }
+    }
+
     $result = Restore-GSVSnapshot -BackupRoot $vault -Snapshot $Snapshot -GameFilter $Game `
-        -DryRun:$isDryRun -SkipRegistry:$SkipRegistry -KeepExisting:$KeepExisting -LogFile $logFile
+        -DryRun:$isDryRun -SkipRegistry:$SkipRegistry -KeepExisting:$KeepExisting -LogFile $logFile `
+        -RestoreFormat $fmt -RestoreRoot $RestoreRoot
 
     Write-Host ''
     Write-Kv 'Snapshot' $result.SnapshotPath 'Green'
@@ -280,8 +321,16 @@ function Invoke-FromOld {
     Write-Title 'Recover saves from Windows.old'
     if ($isDryRun) { Write-Host '  DRY RUN - nothing will be changed.' -ForegroundColor Yellow }
 
+    $fmt = if ($RestoreFormat) { $RestoreFormat.ToLowerInvariant() } else { 'profile' }
+    if ($fmt -notin @('profile', 'verbatim', 'folder')) { throw "Unknown -RestoreFormat '$RestoreFormat'." }
+    if ($fmt -eq 'folder' -and -not $RestoreRoot) { throw '-RestoreRoot is required with -RestoreFormat folder.' }
+    if ($fmt -ne 'profile' -and -not $Quiet) {
+        Write-Kv 'Restore format' $fmt
+        if ($RestoreRoot) { Write-Kv 'Into folder' $RestoreRoot 'Yellow' }
+    }
+
     $result = Import-GSVFromWindowsOld -BackupRoot $vault -WindowsOldRoot $WindowsOldRoot `
-        -GameFilter $Game -DryRun:$isDryRun -NoRestore:$NoRestore -Label 'windows-old'
+        -GameFilter $Game -DryRun:$isDryRun -NoRestore:$NoRestore -Label 'windows-old' -RestoreFormat $fmt -RestoreRoot $RestoreRoot
 
     Write-Host ''
     Write-Kv 'Locations found' $result.Locations
@@ -340,6 +389,127 @@ function Invoke-Add {
     Write-Kv 'Saved game' $entry.Name 'Green'
     Write-Kv 'Paths' ($normalized -join '; ')
     Write-Host '  It will be included in the next backup.' -ForegroundColor DarkGray
+}
+
+function Show-Rules {
+    Write-Title 'Save rules (portable save-location patterns)'
+    $rules = @(Get-GSVRules)
+    Write-Kv 'Database' (Get-GSVRulesPath) 'Yellow'
+
+    if ($rules.Count -eq 0) {
+        Write-Host '  No rules yet. Add one with:' -ForegroundColor Yellow
+        Write-Host '    .\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav' -ForegroundColor DarkGray
+        Write-Host '    .\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved" -InstallDir "My Game"' -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Kv 'Rules' $rules.Count
+    foreach ($r in $rules) {
+        Write-Host ''
+        Write-Host ("  {0}" -f $r.Name) -ForegroundColor Cyan
+        Write-Kv '    id' $r.Id
+        if (@($r.SteamAppIds).Count -gt 0) { Write-Kv '    app ids' (@($r.SteamAppIds) -join ', ') }
+        if (@($r.InstallDirNames).Count -gt 0) { Write-Kv '    install dir names' (@($r.InstallDirNames) -join ', ') }
+        if (@($r.FilePatterns).Count -gt 0) { Write-Kv '    save file patterns' (@($r.FilePatterns) -join ', ') }
+        if (@($r.FolderPatterns).Count -gt 0) { Write-Kv '    save folder patterns' (@($r.FolderPatterns) -join ', ') }
+        foreach ($p in @($r.Paths)) {
+            $pat = if ($p -is [string]) { $p } else { $p.Pattern }
+            $mode = if ($p -is [string]) { 'auto' } else { $p.Mode }
+            Write-Host ("      - {0}  [{1}]" -f $pat, $mode) -ForegroundColor DarkGray
+        }
+        if ($r.Notes) { Write-Kv '    notes' $r.Notes 'DarkGray' }
+    }
+}
+
+function Invoke-RuleAdd {
+    if (-not $Target) {
+        throw 'Usage: .\GameSaveVault.ps1 rule-add "Game name" -Paths "D:\Games\Game\Saves","%APPDATA%\Game" [-SavePattern *.sav]'
+    }
+    if (-not $Paths -or @($Paths).Count -eq 0) {
+        throw 'Provide at least one -Paths value (a folder, a wildcard, or a %TOKEN% pattern).'
+    }
+
+    $installNames = @($InstallDir | Where-Object { $_ })
+    if ($installNames.Count -eq 0) { $installNames = @($Target) }
+
+    $entry = Save-GSVRule -Name $Target -Paths $Paths -FilePatterns $SavePattern `
+        -Aliases $Alias -SteamAppIds $AppId -InstallDirNames $installNames `
+        -Mode $Mode -Notes $Notes
+
+    Write-Host ''
+    Write-Kv 'Saved rule' $entry.Name 'Green'
+    Write-Kv 'id' $entry.Id
+    foreach ($p in @($entry.Paths)) {
+        Write-Kv 'path' ('{0}  [{1}]' -f $p.Pattern, $p.Mode)
+    }
+    if (@($entry.FilePatterns).Count -gt 0) { Write-Kv 'save patterns' (@($entry.FilePatterns) -join ', ') }
+    Write-Host '  Stored in config\save-rules.json as portable token paths.' -ForegroundColor DarkGray
+    Write-Host '  Run "discover" to check what it finds on this machine.' -ForegroundColor DarkGray
+}
+
+function Invoke-RuleRemove {
+    if (-not $Target) { throw 'Usage: .\GameSaveVault.ps1 rule-remove "Game name or rule id"' }
+    $n = Remove-GSVRule -Name $Target
+    Write-Kv 'Removed' $n
+}
+
+function Invoke-RuleImport {
+    if (-not $File) { throw 'Usage: .\GameSaveVault.ps1 rule-import -File rules.json' }
+    $n = Import-GSVRules -Path $File
+    Write-Kv 'Imported' $n 'Green'
+    Write-Kv 'Database' (Get-GSVRulesPath)
+}
+
+function Invoke-RuleExport {
+    $out = if ($File) { $File } else { Join-Path (Get-Location) 'save-rules.export.json' }
+    $p = Export-GSVRules -Path $out
+    Write-Kv 'Exported' $p 'Green'
+}
+
+function Invoke-Discover {
+    Write-Title 'Discover games and saves from save rules'
+    $rules = @(Get-GSVRules)
+    if ($rules.Count -eq 0) {
+        Write-Host '  No save rules yet. Add one with:' -ForegroundColor Yellow
+        Write-Host '    .\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav' -ForegroundColor DarkGray
+        return
+    }
+
+    $all = New-Object System.Collections.Generic.List[object]
+    foreach ($rule in $rules) {
+        $locs = @(Resolve-GSVRulePaths -Rule $rule -NoSize:$NoSize)
+        $gameDir = Find-GSVRuleGameDir -Names @($rule.InstallDirNames)
+
+        Write-Host ''
+        Write-Host ("  {0}" -f $rule.Name) -ForegroundColor Cyan
+        if ($gameDir) { Write-Kv '  install folder' $gameDir 'Green' }
+        else { Write-Kv '  install folder' 'not found on this machine' 'DarkYellow' }
+
+        if ($locs.Count -eq 0) {
+            Write-Kv '  saves' 'none found' 'DarkYellow'
+            continue
+        }
+
+        Write-Kv '  saves' $locs.Count 'Green'
+        foreach ($l in $locs) {
+            $tag = if ($l.RestoreMode) { $l.RestoreMode } else { '-' }
+            Write-Host ("    [{0}] {1}" -f $tag, $l.ResolvedPath) -ForegroundColor Gray
+            $all.Add($l)
+        }
+    }
+
+    if ($Backup -and $all.Count -gt 0) {
+        if ($isDryRun) {
+            Write-Host ''
+            Write-Host '  DRY RUN - nothing will be written.' -ForegroundColor Yellow
+            return
+        }
+        $snap = New-GSVSnapshot -Locations $all.ToArray() -BackupRoot $vault -Label 'discover' -LogFile $logFile
+        Write-Host ''
+        Write-Kv 'Snapshot' $snap.SnapshotPath 'Green'
+        Write-Kv 'Entries' $snap.EntryCount
+        Write-Kv 'Size' (Format-GSVSize $snap.TotalBytes)
+    }
 }
 
 function Invoke-Prune {
@@ -422,6 +592,7 @@ function Show-DeepScan {
     } else {
         $wanted = @($Drive)
         if (($wanted.Count -eq 0) -and $Target) { $wanted = @($Target) }
+        foreach ($d in $Directory) { if ($d) { $wanted += $d } }
         if ($wanted.Count -eq 0) { $wanted = @($env:SystemDrive) }
 
         foreach ($d in $wanted) {
@@ -563,16 +734,25 @@ USAGE
 
 COMMANDS
   scan                 List installed games and the save folders found (default)
-  deep-scan            Search a whole drive for every save folder (CPY / GSE /
-                       Goldberg / scene "remote" / UWP / Steam userdata / LocalLow)
+  deep-scan            Search a whole drive or a folder for every save folder (CPY /
+                       GSE / Goldberg / scene "remote" / UWP / Steam userdata /
+                       LocalLow / emulator titles). -Drive, -Directory, -AllDrives
   migrate              Copy console-emulator saves between emulators
                        (-From eden -To ryujinx, -From kyty, -Title ..., -DryRun)
   backup               Snapshot saves into the vault
-  restore              Copy saves from the newest (or chosen) snapshot back
+  restore              Copy saves from the newest (or chosen) snapshot back.
+                       -RestoreFormat profile (default) / verbatim / folder,
+                       -RestoreRoot <folder> for the folder format
   from-old             Recover saves from C:\Windows.old after a reinstall
   snapshots            List snapshots in the vault
   stats                Vault size / latest snapshot
   add                  Register a custom game + save path
+  rules                List save rules (config\save-rules.json)
+  rule-add             Add a save rule with portable paths + save patterns
+  rule-remove          Remove a save rule
+  rule-import          Import save rules from a JSON file
+  rule-export          Export save rules to a JSON file
+  discover             Find the games + saves described by the rules on THIS PC
   prune                Delete old snapshots
   doctor               Environment and vault diagnostics
   gui                  Open the graphical app
@@ -596,18 +776,37 @@ COMMON OPTIONS
   -Backup              (deep-scan) snapshot everything the scan found
   -From / -To <emu>    (migrate) e.g. eden, ryujinx, eglantine, kyty, shadps4
   -Title <id>          (migrate) only this title id (e.g. 0100… or PPSA…)
+  -Directory <path>    (deep-scan) search specific folders, e.g. -Directory D:\Games
+  -RestoreFormat       (restore/from-old) profile (default) | verbatim | folder
+  -RestoreRoot <folder>    (restore/from-old) folder format: <folder>\<TOKEN>\<path>
+  -SavePattern <glob>  (rule-add) which files are saves, e.g. *.sav,*.dat
+  -Alias <name>        (rule-add) alternative game names for matching
+  -InstallDir <name>   (rule-add) install folder name(s) used to find the game
+  -Mode <mode>         (rule-add) auto | token | gamedir | absolute
+  -Notes <text>        (rule-add) free-form note
+  -File <path>         (rule-import/export) JSON rules file
+  -Backup              (discover) snapshot everything the rules found
 
 EXAMPLES
   .\GameSaveVault.ps1 deep-scan
   .\GameSaveVault.ps1 deep-scan -AllDrives -MaxDepth 12
   .\GameSaveVault.ps1 deep-scan -Drive C: -Backup
+  .\GameSaveVault.ps1 deep-scan -Directory D:\Games,C:\PS5GAMES
   .\GameSaveVault.ps1 migrate -From eden -To ryujinx
   .\GameSaveVault.ps1 migrate -From eden -To ryujinx -Title 0100… -DryRun
   .\GameSaveVault.ps1 backup -All
   .\GameSaveVault.ps1 backup -Game Skyrim,Palworld
   .\GameSaveVault.ps1 restore -Snapshot latest -DryRun
+  .\GameSaveVault.ps1 restore -Snapshot latest
+  .\GameSaveVault.ps1 restore -RestoreFormat verbatim
+  .\GameSaveVault.ps1 restore -RestoreFormat folder -RestoreRoot D:\RestoredSaves
   .\GameSaveVault.ps1 from-old -DryRun
   .\GameSaveVault.ps1 add "My Game" -Paths "%DOCUMENTS%\MyGame\Saves"
+  .\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav -InstallDir "My Game"
+  .\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GSE Saves\1234" -SavePattern *.sav,*.dat
+  .\GameSaveVault.ps1 discover -Backup
+  .\GameSaveVault.ps1 rule-export -File D:\rules.json
+  .\GameSaveVault.ps1 rule-import -File D:\rules.json
 '@ -ForegroundColor Gray
 }
 
@@ -632,6 +831,14 @@ try {
         'snapshots' { Show-Snapshots }
         'stats'     { Show-Stats }
         'add'       { Invoke-Add }
+        'rules'     { Show-Rules }
+        'rule-list' { Show-Rules }
+        'rule-add'  { Invoke-RuleAdd }
+        'rule-remove' { Invoke-RuleRemove }
+        'rule-rm'   { Invoke-RuleRemove }
+        'rule-import' { Invoke-RuleImport }
+        'rule-export' { Invoke-RuleExport }
+        'discover'  { Invoke-Discover }
         'prune'     { Invoke-Prune }
         'doctor'    { Show-Doctor }
         'gui'       {

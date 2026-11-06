@@ -7,7 +7,8 @@
 
 $script:GSVVersion = '1.0.0'
 $script:Root       = Split-Path -Parent $PSScriptRoot
-$script:ConfigDir  = Join-Path $script:Root 'config'
+# GSV_CONFIG_DIR lets tests and portable installs keep settings/rules elsewhere.
+$script:ConfigDir  = if ($env:GSV_CONFIG_DIR) { $env:GSV_CONFIG_DIR } else { Join-Path $script:Root 'config' }
 $script:SettingsPath = Join-Path $script:ConfigDir 'settings.json'
 $script:CustomPath   = Join-Path $script:ConfigDir 'games.custom.json'
 $script:CatalogPath  = Join-Path $script:Root 'data\catalog.psd1'
@@ -851,6 +852,43 @@ function Get-GSVAllGames {
             $g | Add-Member -NotePropertyName Locations -NotePropertyValue $locs -Force
         }
     }
+
+    # --- save rules whose game is not installed / not detected yet --------------
+    # Show them anyway (greyed out in the GUI) so the user can see the rule and
+    # back up saves that live in a launcher folder the normal scan missed.
+    $rules = @(Get-GSVRules)
+    if ($rules.Count -gt 0) {
+        $matchedIds = @{}
+        foreach ($g in $games) {
+            foreach ($rule in $rules) {
+                if (Test-GSVRuleMatchesGame -Rule $rule -Game $g -CatalogEntry $g.CatalogEntry) {
+                    $matchedIds[$rule.Id] = $true
+                }
+            }
+        }
+
+        foreach ($rule in $rules) {
+            if ($matchedIds.ContainsKey($rule.Id)) { continue }
+
+            $locs = @()
+            if (-not $NoLocations) {
+                $locs = @(Resolve-GSVRulePaths -Rule $rule -Settings $Settings)
+            }
+            $gameDir = Find-GSVRuleGameDir -Names @($rule.InstallDirNames)
+            $games.Add([pscustomobject]@{
+                Id           = [string]$rule.Id
+                Name         = [string]$rule.Name
+                Source       = 'Rule'
+                AppId        = if (@($rule.SteamAppIds).Count -gt 0) { [string](@($rule.SteamAppIds)[0]) } else { '' }
+                InstallDir   = if ($gameDir) { Split-Path -Leaf $gameDir } else { '' }
+                GameDir      = $gameDir
+                CatalogEntry = $null
+                Locations    = $locs
+                RuleId       = [string]$rule.Id
+            })
+        }
+    }
+
     return $games.ToArray()
 }
 
@@ -901,6 +939,11 @@ function Get-GSVGameSaveLocations {
             }
         }
     }
+
+    # --- 1b. manual fixture paths for tests that override the token table -------
+    # (legacy; catalog paths above are the source of truth)
+    $missingParents = New-Object System.Collections.Generic.List[string]
+    if ($false) { $missingParents.Add('') }
 
     # --- 2. Steam userdata + scene/emulator save folders -------------------------
     foreach ($id in $appIds) {
@@ -1070,6 +1113,36 @@ function Get-GSVGameSaveLocations {
         }
     }
 
+    # --- 6b. user save rules (config\save-rules.json) ---------------------------
+    # Rules matched to this game add their paths on top of the built-in catalog.
+    # They carry RuleId + RestoreMode so a restore on a new machine can put the
+    # files back next to the freshly installed game.
+    $rules = @(Get-GSVRules | Where-Object { Test-GSVRuleMatchesGame -Rule $_ -Game $Game -CatalogEntry $CatalogEntry })
+    foreach ($rule in $rules) {
+        foreach ($rl in @(Resolve-GSVRulePaths -Rule $rule -Game $Game -TokenTable $table -Settings $Settings -NoSize:$NoSize)) {
+            if (-not $rl.ResolvedPath) { continue }
+            $key = ("{0}|{1}" -f $rl.Token, $rl.RelativePath).ToLowerInvariant()
+            if ($seen.ContainsKey($key)) {
+                # A built-in pattern (scene folder, %GAMEDIR%\Saves heuristic, ...)
+                # already found this folder. Keep one entry but attach the rule
+                # metadata so restore still uses the gamedir/token logic.
+                for ($i = 0; $i -lt $locations.Count; $i++) {
+                    $ex = $locations[$i]
+                    $ek = ("{0}|{1}" -f $ex.Token, $ex.RelativePath).ToLowerInvariant()
+                    if ($ek -ne $key) { continue }
+                    $ex | Add-Member -NotePropertyName RuleId -NotePropertyValue $rl.RuleId -Force
+                    $ex | Add-Member -NotePropertyName RestoreMode -NotePropertyValue $rl.RestoreMode -Force
+                    $ex | Add-Member -NotePropertyName InstallDirNames -NotePropertyValue @($rl.InstallDirNames) -Force
+                    $ex | Add-Member -NotePropertyName FilePatterns -NotePropertyValue @($rl.FilePatterns) -Force
+                    break
+                }
+                continue
+            }
+            $seen[$key] = $true
+            $locations.Add($rl)
+        }
+    }
+
     # --- 7. registry keys (backed up separately) ---------------------------------
     if ($CatalogEntry) {
         foreach ($rk in @($CatalogEntry.RegistryKeys)) {
@@ -1116,6 +1189,696 @@ function Get-GSVGameSaveLocations {
     }
 
     return $final.ToArray()
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- save rules (JSON database)
+
+# A "save rule" is a portable, user-editable description of where one game keeps
+# its saves.  It is stored in config\save-rules.json (JSON Schema in
+# data\save-rules.schema.json) and is the piece that makes restores work on a
+# fresh Windows install / new machine:
+#
+#   * paths are stored as token patterns (%LOCALAPPDATA%\..., %GAMEDIR%\...)
+#     instead of hard-coded C:\Users\<old user>\... paths, so they expand into
+#     the new profile;
+#   * installDirNames lets the tool find the game again (Steam library, repack
+#     folder, D:\Games\..., etc.) and restore save files next to it;
+#   * filePatterns / folderPatterns let the tool discover save folders inside
+#     the game install when the exact path was not known up front.
+
+$script:RulesPath       = Join-Path $script:ConfigDir 'save-rules.json'
+$script:RulesSchemaPath = Join-Path $script:Root 'data\save-rules.schema.json'
+$script:RulesCache      = $null
+
+function Get-GSVRulesPath { return $script:RulesPath }
+
+function Get-GSVRulesSchemaPath { return $script:RulesSchemaPath }
+
+function New-GSVRuleId {
+    param([string]$Name)
+    $slug = (ConvertTo-GSVNormalName -Name $Name) -replace '\s+', '-'
+    $id = 'rule-' + $slug
+    if (-not $slug) {
+        $id = 'rule-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    }
+    return $id
+}
+
+function ConvertTo-GSVRulePathEntry {
+    <#
+        Converts one path (absolute, tokenized, or wildcard) into a stored path
+        object.  Absolute paths under a known token root become %TOKEN%\relative
+        so they survive a reinstall.  Drive-rooted paths inside a game folder
+        become %GAMEDIR%\relative.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('auto','token','gamedir','absolute')][string]$Mode = 'auto',
+        [string[]]$InstallDirNames = @(),
+        [string]$Note = '',
+        [hashtable]$TokenTable
+    )
+    $p = ([string]$Path).Trim().Trim('"')
+    if (-not $p) { return $null }
+
+    # Already tokenized or a wildcard pattern: keep it verbatim.
+    if ($p -match '%[A-Za-z]+%') {
+        return [pscustomobject]@{ Pattern = $p; Mode = $Mode; Include = @(); Note = $Note; Sample = '' }
+    }
+
+    $expanded = [Environment]::ExpandEnvironmentVariables($p)
+    $table = if ($TokenTable) { $TokenTable } else { Get-GSVTokenTable }
+    $anchor = Get-GSVPathAnchor -ResolvedPath $expanded -TokenTable $table
+    if ($anchor.Token) {
+        $pattern = if ($anchor.Relative) {
+            '%' + $anchor.Token + '%\' + $anchor.Relative
+        } else {
+            '%' + $anchor.Token + '%'
+        }
+        return [pscustomobject]@{ Pattern = $pattern; Mode = $Mode; Include = @(); Note = $Note; Sample = $expanded }
+    }
+
+    # Drive-rooted path: try to express it relative to the game install folder.
+    foreach ($n in @($InstallDirNames)) {
+        if (-not $n) { continue }
+        $needle = '\' + ([string]$n).Trim('\') + '\'
+        $hay = $expanded.TrimEnd('\') + '\'
+        $idx = $hay.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase)
+        if ($idx -ge 0) {
+            $rel = $hay.Substring($idx + $needle.Length).TrimEnd('\')
+            $pattern = if ($rel) { '%GAMEDIR%\' + $rel } else { '%GAMEDIR%' }
+            return [pscustomobject]@{ Pattern = $pattern; Mode = 'gamedir'; Include = @(); Note = $Note; Sample = $expanded }
+        }
+    }
+
+    $fallbackMode = if ($Mode -eq 'auto') { 'absolute' } else { $Mode }
+    return [pscustomobject]@{ Pattern = $expanded; Mode = $fallbackMode; Include = @(); Note = $Note; Sample = $expanded }
+}
+
+function ConvertTo-GSVRuleObject {
+    param($Raw)
+    if (-not $Raw) { return $null }
+    $name = [string]$Raw.Name
+    if (-not $name) { return $null }
+
+    $paths = New-Object System.Collections.Generic.List[object]
+    foreach ($p in @($Raw.Paths)) {
+        if ($null -eq $p) { continue }
+        if ($p -is [string]) {
+            if ($p) { $paths.Add([pscustomobject]@{ Pattern = [string]$p; Mode = 'auto'; Include = @(); Note = ''; Sample = '' }) }
+            continue
+        }
+        $pattern = [string]$p.Pattern
+        if (-not $pattern) { continue }
+        $paths.Add([pscustomobject]@{
+            Pattern = $pattern
+            Mode    = if ($p.Mode) { [string]$p.Mode } else { 'auto' }
+            Include = @($p.Include | Where-Object { $_ })
+            Note    = [string]$p.Note
+            Sample  = [string]$p.Sample
+        })
+    }
+
+    $id = if ($Raw.Id) { [string]$Raw.Id } else { New-GSVRuleId -Name $name }
+    return [pscustomobject]@{
+        Id              = $id
+        Name            = $name
+        Aliases         = @($Raw.Aliases | Where-Object { $_ })
+        SteamAppIds     = @($Raw.SteamAppIds | ForEach-Object { [string]$_ } | Where-Object { $_ })
+        InstallDirNames = @($Raw.InstallDirNames | Where-Object { $_ })
+        FilePatterns    = @($Raw.FilePatterns | Where-Object { $_ })
+        FolderPatterns  = @($Raw.FolderPatterns | Where-Object { $_ })
+        Engine          = [string]$Raw.Engine
+        Notes           = [string]$Raw.Notes
+        Discover        = if ($null -ne $Raw.Discover) { [bool]$Raw.Discover } else { $true }
+        Source          = if ($Raw.Source) { [string]$Raw.Source } else { 'user' }
+        CreatedUtc      = [string]$Raw.CreatedUtc
+        UpdatedUtc      = [string]$Raw.UpdatedUtc
+        Paths           = $paths.ToArray()
+    }
+}
+
+function Get-GSVRules {
+    param([switch]$Refresh)
+    if ($script:RulesCache -and -not $Refresh) { return $script:RulesCache }
+
+    $list = New-Object System.Collections.Generic.List[object]
+
+    # First run: seed the database from the shipped example so the feature is
+    # visible and editable instead of starting empty.
+    if (-not (Test-Path -LiteralPath $script:RulesPath)) {
+        $example = Join-Path $script:ConfigDir 'save-rules.example.json'
+        if (Test-Path -LiteralPath $example) {
+            try { Copy-Item -LiteralPath $example -Destination $script:RulesPath -Force -ErrorAction Stop } catch { }
+        }
+    }
+
+    if (Test-Path -LiteralPath $script:RulesPath) {
+        $doc = Read-GSVJson -Path $script:RulesPath
+        if ($doc) {
+            foreach ($r in @($doc.rules)) {
+                $o = ConvertTo-GSVRuleObject -Raw $r
+                if ($o) { $list.Add($o) }
+            }
+        }
+    }
+    $script:RulesCache = $list.ToArray()
+    return $script:RulesCache
+}
+
+function Save-GSVRulesDocument {
+    param([object[]]$Rules)
+    $doc = [ordered]@{
+        '$schema'     = '../data/save-rules.schema.json'
+        schemaVersion = 1
+        updatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+        rules         = @($Rules)
+    }
+    Write-GSVTextFile -Path $script:RulesPath -Text (ConvertTo-Json -InputObject $doc -Depth 12)
+    $script:RulesCache = $null
+}
+
+function Merge-GSVRuleObjects {
+    param(
+        [Parameter(Mandatory)]$Existing,
+        [Parameter(Mandatory)]$Incoming
+    )
+
+    $paths = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($src in @($Existing.Paths) + @($Incoming.Paths)) {
+        if ($null -eq $src) { continue }
+        $pattern = if ($src -is [string]) { [string]$src } else { [string]$src.Pattern }
+        if (-not $pattern) { continue }
+        $mode = if ($src -is [string]) { 'auto' } else { if ($src.Mode) { [string]$src.Mode } else { 'auto' } }
+        $key = ($mode + '|' + $pattern).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $paths.Add([pscustomobject]@{
+            Pattern = $pattern
+            Mode    = $mode
+            Include = if ($src -is [string]) { @() } else { @($src.Include | Where-Object { $_ }) }
+            Note    = if ($src -is [string]) { '' } else { [string]$src.Note }
+            Sample  = if ($src -is [string]) { '' } else { [string]$src.Sample }
+        })
+    }
+
+    $aliases = @(@($Existing.Aliases) + @($Incoming.Aliases) | Where-Object { $_ } | Select-Object -Unique)
+    $appIds = @(@($Existing.SteamAppIds) + @($Incoming.SteamAppIds) | Where-Object { $_ } | Select-Object -Unique)
+    $install = @(@($Existing.InstallDirNames) + @($Incoming.InstallDirNames) | Where-Object { $_ } | Select-Object -Unique)
+    $files = @(@($Existing.FilePatterns) + @($Incoming.FilePatterns) | Where-Object { $_ } | Select-Object -Unique)
+    $folders = @(@($Existing.FolderPatterns) + @($Incoming.FolderPatterns) | Where-Object { $_ } | Select-Object -Unique)
+
+    return [pscustomobject]@{
+        Id              = $Incoming.Id
+        Name            = $Incoming.Name
+        Aliases         = $aliases
+        SteamAppIds     = $appIds
+        InstallDirNames = $install
+        FilePatterns    = $files
+        FolderPatterns  = $folders
+        Engine          = if ($Incoming.Engine) { $Incoming.Engine } else { $Existing.Engine }
+        Notes           = if ($Incoming.Notes) { $Incoming.Notes } else { $Existing.Notes }
+        Discover        = $Incoming.Discover
+        Source          = if ($Incoming.Source) { $Incoming.Source } else { 'user' }
+        CreatedUtc      = if ($Existing.CreatedUtc) { $Existing.CreatedUtc } else { (Get-Date).ToUniversalTime().ToString('o') }
+        UpdatedUtc      = (Get-Date).ToUniversalTime().ToString('o')
+        Paths           = $paths.ToArray()
+    }
+}
+
+function Save-GSVRule {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string[]]$Paths = @(),
+        [string[]]$FilePatterns = @(),
+        [string[]]$FolderPatterns = @(),
+        [string[]]$Aliases = @(),
+        [string[]]$SteamAppIds = @(),
+        [string[]]$InstallDirNames = @(),
+        [ValidateSet('auto','token','gamedir','absolute')][string]$Mode = 'auto',
+        [string]$Notes = '',
+        [string]$Id = '',
+        [bool]$Discover = $true,
+        [hashtable]$TokenTable
+    )
+
+    if (-not $InstallDirNames -or @($InstallDirNames).Count -eq 0) { $InstallDirNames = @($Name) }
+
+    $pathObjects = New-Object System.Collections.Generic.List[object]
+    foreach ($p in @($Paths)) {
+        if (-not $p) { continue }
+        $obj = ConvertTo-GSVRulePathEntry -Path $p -Mode $Mode -InstallDirNames $InstallDirNames -TokenTable $TokenTable
+        if ($obj) { $pathObjects.Add($obj) }
+    }
+
+    $incoming = [pscustomobject]@{
+        Id              = if ($Id) { [string]$Id } else { New-GSVRuleId -Name $Name }
+        Name            = $Name
+        Aliases         = @($Aliases | Where-Object { $_ })
+        SteamAppIds     = @($SteamAppIds | ForEach-Object { [string]$_ } | Where-Object { $_ })
+        InstallDirNames = @($InstallDirNames | Where-Object { $_ })
+        FilePatterns    = @($FilePatterns | Where-Object { $_ })
+        FolderPatterns  = @($FolderPatterns | Where-Object { $_ })
+        Engine          = ''
+        Notes           = $Notes
+        Discover        = $Discover
+        Source          = 'user'
+        CreatedUtc      = ''
+        UpdatedUtc      = ''
+        Paths           = $pathObjects.ToArray()
+    }
+
+    $rules = @(Get-GSVRules -Refresh)
+    $existing = $rules | Where-Object { $_.Id -eq $incoming.Id -or $_.Name -eq $Name } | Select-Object -First 1
+
+    $merged = if ($existing) {
+        Merge-GSVRuleObjects -Existing $existing -Incoming $incoming
+    } else {
+        $incoming.CreatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+        $incoming.UpdatedUtc = $incoming.CreatedUtc
+        $incoming
+    }
+
+    $out = New-Object System.Collections.Generic.List[object]
+    $replaced = $false
+    foreach ($r in $rules) {
+        if ($r.Id -eq $merged.Id -or $r.Name -eq $merged.Name) {
+            if (-not $replaced) { $out.Add($merged); $replaced = $true }
+        } else {
+            $out.Add($r)
+        }
+    }
+    if (-not $replaced) { $out.Add($merged) }
+
+    Save-GSVRulesDocument -Rules $out.ToArray()
+    return $merged
+}
+
+function Remove-GSVRule {
+    param([string]$Id = '', [string]$Name = '')
+    $needle = if ($Id) { $Id } elseif ($Name) { $Name } else { '' }
+    if (-not $needle) { return 0 }
+
+    $rules = @(Get-GSVRules -Refresh)
+    $kept = New-Object System.Collections.Generic.List[object]
+    $removed = 0
+    foreach ($r in $rules) {
+        if ($r.Id -eq $needle -or $r.Name -eq $needle) {
+            $removed++
+        } else {
+            $kept.Add($r)
+        }
+    }
+    if ($removed -gt 0) { Save-GSVRulesDocument -Rules $kept.ToArray() }
+    return $removed
+}
+
+function Import-GSVRules {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Rules file not found: $Path" }
+
+    $doc = Read-GSVJson -Path $Path
+    if (-not $doc) { throw "Could not read rules file: $Path" }
+
+    $rawRules = if ($doc.rules) { @($doc.rules) } elseif ($doc -is [array]) { @($doc) } else { @() }
+    if (@($rawRules).Count -eq 0) { return 0 }
+
+    $current = @(Get-GSVRules -Refresh)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $current) { $out.Add($r) }
+
+    $imported = 0
+    foreach ($raw in $rawRules) {
+        $incoming = ConvertTo-GSVRuleObject -Raw $raw
+        if (-not $incoming) { continue }
+        $incoming.Source = 'imported'
+
+        $idx = -1
+        for ($i = 0; $i -lt $out.Count; $i++) {
+            if ($out[$i].Id -eq $incoming.Id -or $out[$i].Name -eq $incoming.Name) { $idx = $i; break }
+        }
+        if ($idx -ge 0) {
+            $out[$idx] = Merge-GSVRuleObjects -Existing $out[$idx] -Incoming $incoming
+        } else {
+            $incoming.CreatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            $incoming.UpdatedUtc = $incoming.CreatedUtc
+            $out.Add($incoming)
+        }
+        $imported++
+    }
+
+    if ($imported -gt 0) { Save-GSVRulesDocument -Rules $out.ToArray() }
+    return $imported
+}
+
+function Export-GSVRules {
+    param([Parameter(Mandatory)][string]$Path)
+    $doc = [ordered]@{
+        '$schema'     = 'https://raw.githubusercontent.com/your-org/GameSaveVault/main/data/save-rules.schema.json'
+        schemaVersion = 1
+        exportedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+        rules         = @(Get-GSVRules)
+    }
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    Write-GSVTextFile -Path $Path -Text (ConvertTo-Json -InputObject $doc -Depth 12)
+    return $Path
+}
+
+function Test-GSVRuleMatchesGame {
+    param($Rule, $Game, $CatalogEntry)
+    if (-not $Rule -or -not $Game) { return $false }
+
+    $ids = @($Rule.SteamAppIds | ForEach-Object { [string]$_ })
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($Game.AppId) { $candidates.Add([string]$Game.AppId) }
+    if ($CatalogEntry) {
+        foreach ($id in @($CatalogEntry.SteamAppIds)) { if ($id) { $candidates.Add([string]$id) } }
+    }
+    foreach ($id in $candidates.ToArray()) {
+        if ($id -and ($ids -contains $id)) { return $true }
+    }
+
+    $names = New-Object System.Collections.Generic.List[string]
+    if ($Game.Name) { $names.Add([string]$Game.Name) }
+    if ($CatalogEntry) {
+        if ($CatalogEntry.Name) { $names.Add([string]$CatalogEntry.Name) }
+        foreach ($a in @($CatalogEntry.Aliases)) { if ($a) { $names.Add([string]$a) } }
+    }
+
+    foreach ($n in $names.ToArray()) {
+        if ($Rule.Name -and (Test-GSVNameSimilar -A $n -B $Rule.Name)) { return $true }
+        foreach ($a in @($Rule.Aliases)) {
+            if ($a -and (Test-GSVNameSimilar -A $n -B $a)) { return $true }
+        }
+    }
+    return $false
+}
+
+function Find-GSVRuleGameDir {
+    <#
+        Finds the install folder of a game on THIS machine.  This is what lets a
+        restore on a new PC put the save files back next to the game even when
+        the drive letter or folder layout changed.
+    #>
+    param([string[]]$Names = @())
+
+    $wanted = @($Names | Where-Object { $_ } | Select-Object -Unique)
+    if ($wanted.Count -eq 0) { return '' }
+
+    $settings = Get-GSVSettings
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    foreach ($lib in @(Get-GSVSteamLibraries)) {
+        if ($lib) { $roots.Add((Join-Path $lib 'steamapps\common')) }
+    }
+    foreach ($r in @($settings.GameScanRoots)) { if ($r) { $roots.Add([string]$r) } }
+    foreach ($d in @(Get-GSVFixedDriveRoots)) {
+        foreach ($sub in @('Games','Game','PC Games','Repacks','FitGirl Repacks','DODI Repacks','ElAmigos','GOG Games')) {
+            $p = Join-Path $d $sub
+            if (Test-Path -LiteralPath $p) { $roots.Add($p) }
+        }
+    }
+
+    # 1. direct / fuzzy child of a known game root
+    foreach ($root in $roots) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        foreach ($n in $wanted) {
+            $c = Join-Path $root $n
+            if (Test-Path -LiteralPath $c -PathType Container) {
+                return (Get-Item -LiteralPath $c -ErrorAction SilentlyContinue).FullName
+            }
+        }
+        foreach ($child in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($n in $wanted) {
+                if ($child.Name -ieq $n -or (Test-GSVNameSimilar -A $child.Name -B $n)) {
+                    return $child.FullName
+                }
+            }
+        }
+    }
+
+    # 2. shallow walk of each fixed drive (repacks often live in custom folders)
+    $skip = @(
+        'windows','program files','program files (x86)','programdata','users','$recycle.bin',
+        'system volume information','perflogs','recovery','config.msi','documents and settings',
+        'msocache','$windows.~bt','$windows.~ws','intel','amd','nvidia','temp','tmp'
+    )
+    $gameParents = @('Games','Game','PC Games','Repacks','FitGirl Repacks','DODI Repacks','ElAmigos','GOG Games','Epic Games')
+
+    foreach ($drive in @(Get-GSVFixedDriveRoots)) {
+        foreach ($d1 in @(Get-ChildItem -LiteralPath $drive -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($skip -contains $d1.Name.ToLowerInvariant()) { continue }
+            foreach ($n in $wanted) {
+                if ($d1.Name -ieq $n -or (Test-GSVNameSimilar -A $d1.Name -B $n)) { return $d1.FullName }
+            }
+            if ($gameParents -notcontains $d1.Name) { continue }
+            foreach ($d2 in @(Get-ChildItem -LiteralPath $d1.FullName -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($n in $wanted) {
+                    if ($d2.Name -ieq $n -or (Test-GSVNameSimilar -A $d2.Name -B $n)) { return $d2.FullName }
+                }
+            }
+        }
+    }
+    return ''
+}
+
+function Find-GSVSavesByPattern {
+    <#
+        Bounded search inside a game install folder.  Used when a rule exists but
+        the exact save path was not known when the rule was created.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string[]]$FilePatterns = @(),
+        [string[]]$FolderPatterns = @(),
+        [int]$MaxDepth = 4,
+        [int]$MaxResults = 25
+    )
+    $results = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $results.ToArray() }
+
+    $patterns = @($FilePatterns | Where-Object { $_ })
+    if ($patterns.Count -eq 0) {
+        $patterns = @('*.sav','*.save','*.dat','*.slot','*.profile','*.json','*.xml','*.ini','*.bin','*.db','*.sqlite','*.bak')
+    }
+    $names = @($FolderPatterns | Where-Object { $_ })
+    if ($names.Count -eq 0) {
+        $names = @('*save*','*Save*','Saves','SaveGames','Saved','SaveData','profile','profiles','userdata','UserData')
+    }
+
+    $skipDirs = @('cache','shadercache','logs','crashdumps','__pycache__','.git','binaries','engine','content','paks','movies')
+
+    $queue = New-Object System.Collections.Generic.Queue[object]
+    $queue.Enqueue([pscustomobject]@{ Path = $Root; Depth = 0 })
+
+    while ($queue.Count -gt 0 -and $results.Count -lt $MaxResults) {
+        $cur = $queue.Dequeue()
+        $leaf = Split-Path -Leaf $cur.Path
+        $isHit = $false
+
+        foreach ($n in $names) {
+            if ($leaf -like $n) { $isHit = $true; break }
+        }
+        if (-not $isHit) {
+            foreach ($pat in $patterns) {
+                $f = Get-ChildItem -LiteralPath $cur.Path -File -Filter $pat -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($f) { $isHit = $true; break }
+            }
+        }
+        if ($isHit -and $cur.Depth -gt 0) { $results.Add($cur.Path) }
+
+        if ($cur.Depth -ge $MaxDepth) { continue }
+        foreach ($d in @(Get-ChildItem -LiteralPath $cur.Path -Directory -ErrorAction SilentlyContinue)) {
+            $dn = $d.Name.ToLowerInvariant()
+            if ($script:FolderBlocklist -contains $dn) { continue }
+            if ($skipDirs -contains $dn) { continue }
+            $queue.Enqueue([pscustomobject]@{ Path = $d.FullName; Depth = $cur.Depth + 1 })
+        }
+    }
+    return $results.ToArray()
+}
+
+function New-GSVRuleLocation {
+    param(
+        [string]$GameId, [string]$GameName, [string]$Source, [string]$AppId,
+        [string]$InstallDirHint, $Token, [string]$RelativePath, [string]$ResolvedPath,
+        [string]$Kind, [string]$Note, [string]$Origin, [bool]$Exists,
+        $FileCount, $Bytes, [string]$RuleId, [string]$RestoreMode,
+        [string[]]$InstallDirNames, [string[]]$FilePatterns
+    )
+    return [pscustomobject]@{
+        GameId          = $GameId
+        GameName        = $GameName
+        Source          = $Source
+        AppId           = $AppId
+        InstallDirHint  = $InstallDirHint
+        Token           = $Token
+        RelativePath    = $RelativePath
+        ResolvedPath    = $ResolvedPath
+        Kind            = $Kind
+        Note            = $Note
+        Origin          = $Origin
+        Exists          = $Exists
+        FileCount       = $FileCount
+        Bytes           = $Bytes
+        RuleId          = $RuleId
+        RestoreMode     = $RestoreMode
+        InstallDirNames = @($InstallDirNames)
+        FilePatterns    = @($FilePatterns)
+    }
+}
+
+function Resolve-GSVRulePaths {
+    param(
+        [Parameter(Mandatory)]$Rule,
+        [hashtable]$TokenTable,
+        $Settings,
+        [switch]$IncludeMissing,
+        [switch]$NoSize,
+        $Game
+    )
+    if (-not $Settings) { $Settings = Get-GSVSettings }
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+
+    $table = @{}
+    foreach ($k in $TokenTable.Keys) { $table[$k] = $TokenTable[$k] }
+
+    $hints = New-Object System.Collections.Generic.List[string]
+    foreach ($h in @($Rule.InstallDirNames)) { if ($h) { $hints.Add([string]$h) } }
+    if ($hints.Count -eq 0 -and $Rule.Name) { $hints.Add([string]$Rule.Name) }
+
+    $gameDir = Find-GSVRuleGameDir -Names $hints.ToArray()
+    if ($gameDir) { $table['GAMEDIR'] = $gameDir }
+
+    $gameId = if ($Game -and $Game.Id) { [string]$Game.Id } else { [string]$Rule.Id }
+    $gameName = if ($Game -and $Game.Name) { [string]$Game.Name } else { [string]$Rule.Name }
+    $source = if ($Game -and $Game.Source) { [string]$Game.Source } else { 'Rule' }
+    $appId = ''
+    if ($Game -and $Game.AppId) { $appId = [string]$Game.AppId }
+    elseif (@($Rule.SteamAppIds).Count -gt 0) { $appId = [string](@($Rule.SteamAppIds)[0]) }
+    $installHint = if ($gameDir) { Split-Path -Leaf $gameDir } elseif ($hints.Count) { $hints[0] } else { '' }
+
+    $results = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    $hadHit = $false
+
+    foreach ($p in @($Rule.Paths)) {
+        if ($null -eq $p) { continue }
+        $pattern = if ($p -is [string]) { [string]$p } else { [string]$p.Pattern }
+        if (-not $pattern) { continue }
+        $mode = if ($p -is [string]) { 'auto' } else { if ($p.Mode) { [string]$p.Mode } else { 'auto' } }
+        $note = if ($p -is [string]) { '' } else { [string]$p.Note }
+        $isGameDir = $pattern -match '^%GAMEDIR%'
+
+        $resolved = @()
+        if ($isGameDir) {
+            if (-not $gameDir) { continue }
+            $relPattern = $pattern -replace '^%GAMEDIR%[\\/]*', ''
+            $abs = if ($relPattern) { Join-Path $gameDir $relPattern } else { $gameDir }
+            $resolved = @(Resolve-GSVPathPattern -Pattern $abs -TokenTable $table)
+            if ($resolved.Count -eq 0 -and $IncludeMissing) { $resolved = @($abs) }
+        } else {
+            $resolved = @(Resolve-GSVPathPattern -Pattern $pattern -TokenTable $table)
+            if ($resolved.Count -eq 0 -and $IncludeMissing) {
+                $exp = Expand-GSVToken -Path $pattern -TokenTable $table
+                if ($exp -notmatch '%[A-Za-z]+%') { $resolved = @($exp) }
+            }
+        }
+
+        foreach ($path in $resolved) {
+            if (-not $path) { continue }
+            if ($Settings.BackupRoot -and $path.StartsWith($Settings.BackupRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+
+            $exists = Test-Path -LiteralPath $path
+            if (-not $exists -and -not $IncludeMissing) { continue }
+
+            $anchor = Get-GSVPathAnchor -ResolvedPath $path -TokenTable $table
+            $token = $anchor.Token
+            $rel = $anchor.Relative
+            $restoreMode = $mode
+
+            if ($isGameDir) {
+                $token = 'GAMEDIR'
+                $rel = $pattern -replace '^%GAMEDIR%[\\/]*', ''
+                $restoreMode = 'gamedir'
+            } elseif ($token -eq 'GAMEDIR') {
+                $restoreMode = 'gamedir'
+            } elseif (-not $token) {
+                $mapped = $false
+                if ($gameDir -and $path.StartsWith($gameDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    $token = 'GAMEDIR'
+                    $rel = $path.Substring($gameDir.TrimEnd('\').Length + 1)
+                    $restoreMode = 'gamedir'
+                    $mapped = $true
+                }
+                if (-not $mapped) {
+                    foreach ($h in $hints.ToArray()) {
+                        $needle = '\' + ([string]$h).Trim('\') + '\'
+                        $hay = $path.TrimEnd('\') + '\'
+                        $idx = $hay.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase)
+                        if ($idx -ge 0) {
+                            $token = 'GAMEDIR'
+                            $rel = $hay.Substring($idx + $needle.Length).TrimEnd('\')
+                            $restoreMode = 'gamedir'
+                            $mapped = $true
+                            break
+                        }
+                    }
+                }
+                if (-not $mapped) { $restoreMode = 'absolute' }
+            } else {
+                if ($restoreMode -eq 'auto') { $restoreMode = 'token' }
+            }
+
+            $key = ("{0}|{1}" -f $token, $rel).ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+
+            $isFile = $false
+            try { $isFile = (Test-Path -LiteralPath $path -PathType Leaf) } catch { }
+            $size = $null
+            if ($exists -and -not $NoSize) { $size = Measure-GSVPathSize -Path $path }
+
+            $results.Add((New-GSVRuleLocation `
+                -GameId $gameId -GameName $gameName -Source $source -AppId $appId `
+                -InstallDirHint $installHint -Token $token -RelativePath $rel -ResolvedPath $path `
+                -Kind $(if ($isFile) { 'File' } else { 'Directory' }) -Note $note -Origin 'rule' `
+                -Exists $exists -FileCount $(if ($size) { $size.Files } else { $null }) `
+                -Bytes $(if ($size) { $size.Bytes } else { $null }) `
+                -RuleId ([string]$Rule.Id) -RestoreMode $restoreMode `
+                -InstallDirNames $hints.ToArray() -FilePatterns @($Rule.FilePatterns)))
+            $hadHit = $true
+        }
+    }
+
+    # Nothing matched, but the game is installed: look for save-like folders.
+    if (-not $hadHit -and $gameDir -and $Rule.Discover) {
+        $found = @(Find-GSVSavesByPattern -Root $gameDir -FilePatterns @($Rule.FilePatterns) -FolderPatterns @($Rule.FolderPatterns))
+        foreach ($f in $found) {
+            $rel = $f.Substring($gameDir.TrimEnd('\').Length).TrimStart('\')
+            $key = ('gamedir|' + $rel).ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+
+            $size = $null
+            if (-not $NoSize) { $size = Measure-GSVPathSize -Path $f }
+
+            $results.Add((New-GSVRuleLocation `
+                -GameId $gameId -GameName $gameName -Source $source -AppId $appId `
+                -InstallDirHint $installHint -Token 'GAMEDIR' -RelativePath $rel -ResolvedPath $f `
+                -Kind 'Directory' -Note 'discovered by save pattern' -Origin 'rule-discover' `
+                -Exists $true -FileCount $(if ($size) { $size.Files } else { $null }) `
+                -Bytes $(if ($size) { $size.Bytes } else { $null }) `
+                -RuleId ([string]$Rule.Id) -RestoreMode 'gamedir' `
+                -InstallDirNames $hints.ToArray() -FilePatterns @($Rule.FilePatterns)))
+        }
+    }
+
+    return $results.ToArray()
 }
 
 #endregion

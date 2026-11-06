@@ -16,6 +16,8 @@
 #>
 
 $ErrorActionPreference = 'Stop'
+# Isolate the settings / save-rule database from the real config folder.
+$env:GSV_CONFIG_DIR = Join-Path $env:TEMP ('gsv-emucfg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $root = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $root 'modules\GSV.Core.psm1') -Force
 Import-Module (Join-Path $root 'modules\GSV.Vault.psm1') -Force

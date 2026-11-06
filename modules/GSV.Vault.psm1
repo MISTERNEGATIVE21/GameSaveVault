@@ -7,6 +7,13 @@
 $script:GSVVersion = '1.0.0'
 $script:Root = Split-Path -Parent $PSScriptRoot
 
+# Vault depends on the discovery helpers in GSV.Core.  Import it when the
+# caller imported only this module (tests / direct use).
+if (-not (Get-Command Get-GSVTokenTable -ErrorAction SilentlyContinue)) {
+    $coreModule = Join-Path $PSScriptRoot 'GSV.Core.psm1'
+    if (Test-Path -LiteralPath $coreModule) { Import-Module $coreModule -Force }
+}
+
 #region ---------------------------------------------------------------- copy helpers
 
 function Invoke-GSVCopyTree {
@@ -158,6 +165,10 @@ function New-GSVSnapshot {
                     Files          = @([pscustomobject]@{ Path = 'registry.reg'; Size = [int64]$fi.Length; LastWriteUtc = $fi.LastWriteTimeUtc.ToString('o') })
                     Note           = $loc.Note
                     Origin         = $loc.Origin
+                    RuleId         = $loc.RuleId
+                    RestoreMode    = $loc.RestoreMode
+                    InstallDirNames = @($loc.InstallDirNames)
+                    FilePatterns   = @($loc.FilePatterns)
                 })
                 $totalBytes += [int64]$fi.Length
                 $totalFiles++
@@ -215,6 +226,10 @@ function New-GSVSnapshot {
                 Files          = $files
                 Note           = $loc.Note
                 Origin         = $loc.Origin
+                RuleId         = $loc.RuleId
+                RestoreMode    = $loc.RestoreMode
+                InstallDirNames = @($loc.InstallDirNames)
+                FilePatterns   = @($loc.FilePatterns)
             })
 
             $totalBytes += $bytes
@@ -381,14 +396,77 @@ function Find-GSVGameDir {
 function Resolve-GSVTargetPath {
     param(
         [Parameter(Mandatory)]$Entry,
-        [hashtable]$TokenTable
+        [hashtable]$TokenTable,
+        [string]$RestoreFormat = 'profile',
+        [string]$RestoreRoot = ''
     )
     if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
 
     if ($Entry.Kind -eq 'Registry') { return $null }
 
+    # ---- verbatim: write to the exact absolute path recorded in the manifest
+    # (the original drive layout, e.g. C:\Users\<olduser>\...). This recreates
+    # the old profile on a fresh install instead of using the new one.
+    if ($RestoreFormat -eq 'verbatim') {
+        if ($Entry.Token -eq 'GAMEDIR') { return $null }  # install-relative: cannot be verbatim
+        if ($Entry.AbsolutePath) { return [string]$Entry.AbsolutePath }
+        # entries without an absolute path fall back to the profile view
+    }
+
+    # ---- folder: keep the layout, but root everything under one folder
+    if ($RestoreFormat -eq 'folder') {
+        $root = if ($RestoreRoot) { $RestoreRoot } else { $null }
+        if (-not $root) { return $null }
+        if ($Entry.Token) {
+            $sub = Join-Path $Entry.Token ([string]$Entry.RelativePath)
+            return (Join-Path $root $sub)
+        }
+        if ($Entry.AbsolutePath) {
+            # strip the drive letter and keep the rest of the original path
+            $abs = [string]$Entry.AbsolutePath
+            $driveRoot = ''
+            try { $driveRoot = [System.IO.Path]::GetPathRoot($abs) } catch { }
+            $rel = if ($driveRoot) { $abs.Substring($driveRoot.Length) } else { $abs.TrimStart('\', '/') }
+            return (Join-Path $root $rel)
+        }
+        return $null
+    }
+
+    # ---- save rules: put the save back next to the game found on THIS machine
+    # (new drive letter / new install folder / repack folder).
+    if ($RestoreFormat -eq 'profile' -and $Entry.RestoreMode) {
+        $rm = ([string]$Entry.RestoreMode).ToLowerInvariant()
+        $hints = New-Object System.Collections.Generic.List[string]
+        if ($Entry.InstallDirHint) { $hints.Add([string]$Entry.InstallDirHint) }
+        foreach ($h in @($Entry.InstallDirNames)) { if ($h) { $hints.Add([string]$h) } }
+
+        if ($rm -eq 'gamedir' -and $hints.Count -gt 0) {
+            $dir = ''
+            foreach ($h in $hints.ToArray()) {
+                $dir = Find-GSVGameDir -Hint $h
+                if (-not $dir) { $dir = Find-GSVRuleGameDir -Names @($h) }
+                if ($dir) { break }
+            }
+            if ($dir) {
+                if ($Entry.RelativePath) { return (Join-Path $dir ([string]$Entry.RelativePath)) }
+                return $dir
+            }
+            # game not installed yet: fall through to the normal token view
+        }
+        elseif ($rm -eq 'absolute') {
+            $abs = [string]$Entry.AbsolutePath
+            if ($abs) {
+                $root = ''
+                try { $root = [System.IO.Path]::GetPathRoot($abs) } catch { }
+                if ($root -and (Test-Path -LiteralPath $root)) { return $abs }
+            }
+            return $null
+        }
+    }
+
     if ($Entry.Token -eq 'GAMEDIR') {
         $dir = Find-GSVGameDir -Hint $Entry.InstallDirHint
+        if (-not $dir) { $dir = Find-GSVRuleGameDir -Names @($Entry.InstallDirHint) }
         if (-not $dir) { return $null }
         if ($Entry.RelativePath) { return (Join-Path $dir $Entry.RelativePath) }
         return $dir
@@ -468,6 +546,8 @@ function Restore-GSVSnapshot {
         [switch]$NoRollback,
         [switch]$KeepExisting,
         [hashtable]$TokenTable,
+        [string]$RestoreFormat = 'profile',
+        [string]$RestoreRoot = '',
         [string]$LogFile
     )
 
@@ -478,6 +558,9 @@ function Restore-GSVSnapshot {
     $entries = @($manifest.Entries)
     if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
     $table = $TokenTable
+    $fmt = if ($RestoreFormat) { ([string]$RestoreFormat).ToLowerInvariant() } else { 'profile' }
+    if ($fmt -notin @('profile', 'verbatim', 'folder')) { throw "Unknown restore format: $RestoreFormat" }
+    if ($fmt -eq 'folder' -and -not $RestoreRoot) { throw '-RestoreRoot is required with -RestoreFormat folder.' }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
     $restored = 0
@@ -487,7 +570,7 @@ function Restore-GSVSnapshot {
     $bytes = [int64]0
     $messages = New-Object System.Collections.Generic.List[string]
 
-    Write-GSVLog -Level Info -Message ("Snapshot: {0}  ({1} entries)" -f $snap.Path, $entries.Count)
+    Write-GSVLog -Level Info -Message ("Snapshot: {0}  ({1} entries, format={2})" -f $snap.Path, $entries.Count, $fmt)
 
     foreach ($e in $entries) {
         $label = if ($e.Kind -eq 'Registry') { $e.RegistryKey } else { "$($e.GameName): $($e.Token)\$($e.RelativePath)" }
@@ -526,7 +609,7 @@ function Restore-GSVSnapshot {
             continue
         }
 
-        $target = Resolve-GSVTargetPath -Entry $e -TokenTable $table
+        $target = Resolve-GSVTargetPath -Entry $e -TokenTable $table -RestoreFormat $fmt -RestoreRoot $RestoreRoot
         if (-not $target) {
             $reason = if ($e.Token -eq 'GAMEDIR') { 'game not installed (GAMEDIR not found)' } else { "token '$($e.Token)' unavailable" }
             Write-GSVLog -Level Warn -Message "skipped $label ($reason)"
@@ -592,6 +675,8 @@ function Restore-GSVSnapshot {
         Skipped      = $skipped
         Failed       = $failed
         Bytes        = $bytes
+        Format       = $fmt
+        RestoreRoot  = $RestoreRoot
         Messages     = $messages.ToArray()
         DryRun       = [bool]$DryRun
     }
@@ -612,7 +697,9 @@ function Import-GSVFromWindowsOld {
         [switch]$DryRun,
         [switch]$NoRestore,
         [switch]$NoSize,
-        [string]$Label = 'windows-old'
+        [string]$Label = 'windows-old',
+        [string]$RestoreFormat = 'profile',
+        [string]$RestoreRoot = ''
     )
 
     $roots = if ($WindowsOldRoot) { @($WindowsOldRoot) } else { @(Get-GSVWindowsOldRoots) }
@@ -650,7 +737,7 @@ function Import-GSVFromWindowsOld {
         return [pscustomobject]@{ Locations = $unique.Count; Snapshot = $snap; Restore = $null }
     }
 
-    $restore = Restore-GSVSnapshot -BackupRoot $BackupRoot -Snapshot $snap.SnapshotPath -GameFilter $GameFilter
+    $restore = Restore-GSVSnapshot -BackupRoot $BackupRoot -Snapshot $snap.SnapshotPath -GameFilter $GameFilter -RestoreFormat $RestoreFormat -RestoreRoot $RestoreRoot
     return [pscustomobject]@{ Locations = $unique.Count; Snapshot = $snap; Restore = $restore }
 }
 
