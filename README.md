@@ -1,8 +1,33 @@
 # GameSaveVault
 
+[**GitHub repository**](https://github.com/MISTERNEGATIVE21/GameSaveVault) · [Install from GitHub](#install-from-github) · [Download ZIP](https://github.com/MISTERNEGATIVE21/GameSaveVault/archive/refs/heads/main.zip)
+
 A local Windows app that finds your game save folders, copies them into a vault on another drive, and puts them back after you reinstall Windows.
 
-It handles normal Steam/Epic/GOG games **and** repack / Steam-emulator setups (FitGirl, DODI, ElAmigos, Goldberg, SmartSteamEmu, CODEX/RUNE/EMPRESS saves). It does not download games, patch DRM, or touch game install files — it only copies save data, profiles and settings.
+It works with **any games**, including normal Steam/Epic/GOG games, repack and crack games, and emulators. It does not download games, patch DRM, or touch game install files — it only copies save data, profiles and settings.
+
+---
+
+## Install from GitHub
+
+**Repository:** https://github.com/MISTERNEGATIVE21/GameSaveVault
+
+Click **[Code → Download ZIP](https://github.com/MISTERNEGATIVE21/GameSaveVault/archive/refs/heads/main.zip)**, or run this one-line PowerShell installer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/Install-GameSaveVault.ps1 | iex"
+```
+
+It downloads the latest `main` into `%LOCALAPPDATA%\GameSaveVault`, then creates the desktop and Start-menu shortcuts.
+
+To include the optional daily backup task, run:
+
+```powershell
+$s = irm 'https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/Install-GameSaveVault.ps1'
+& ([scriptblock]::Create($s)) -ScheduledTask -Time 21:30
+```
+
+Requirements: Windows 10/11 and Windows PowerShell 5.1 (built in). No admin rights are needed.
 
 ---
 
@@ -24,7 +49,7 @@ There are two ways to get them back:
 ### Plan A (recommended): back up to another drive **before** reinstalling
 
 ```powershell
-cd "H:\Documents\Default Project\GameSaveVault"
+cd "$env:LOCALAPPDATA\GameSaveVault"
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 backup -All
 ```
 
@@ -51,7 +76,7 @@ powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 from-old
 What it does:
 
 1. Finds every `Windows.old\Users\*` profile (and its `Documents`, `AppData`, `Saved Games`, `OneDrive\Documents`).
-2. Scans the catalog + safe game roots + Steam userdata + emulator/scene folders.
+2. Scans the catalog + safe game roots + Steam userdata + emulator and crack folders.
 3. Copies everything into a normal vault snapshot.
 4. Restores that snapshot into the current profile.
 
@@ -64,7 +89,7 @@ Use `-WindowsOldRoot "D:\Windows.old"` if the old install is on another drive.
 Requirements: Windows 10/11, Windows PowerShell 5.1 (built in). No admin rights for normal use.
 
 ```powershell
-cd "H:\Documents\Default Project\GameSaveVault"
+cd "$env:LOCALAPPDATA\GameSaveVault"
 
 # 1. see what it finds
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 scan
@@ -120,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File .\Install.ps1 -ScheduledTask -Time 21:3
 |---|---|
 | `scan` | Detect installed games and the save folders found (default). `-Detailed` prints every path. |
 | `deep-scan` | Search a whole drive for save folders the normal scan may miss (aliases: `deepscan`, `deep`, `search`). `-Drive C:`, `-AllDrives`, `-MaxDepth 12`, `-MaxResults 500`, `-NoSize`, `-Backup`. |
-| `migrate` | Copy console-emulator saves between emulators: `-From eden -To ryujinx`, `-From kyty`, `-Title <id>`, `-DryRun`. |
+| `migrate` | Copy console-emulator saves between emulators: `-From <source> -To <target>`, `-Title <id>`, `-DryRun`. |
 | `backup` | Snapshot saves into the vault. `-All` includes launcher-wide/emulator folders. `-Game Skyrim,Palworld` limits it. |
 | `restore` | Restore the latest or a named snapshot. `-DryRun`, `-Game`, `-KeepExisting`, `-SkipRegistry`. |
 | `from-old` | Import + restore saves from `C:\Windows.old`. `-DryRun`, `-NoRestore`, `-WindowsOldRoot`. |
@@ -145,14 +170,14 @@ Common switches:
 -Hash                            # store SHA256 per file (slower)
 -SkipRegistry                    # do not import .reg settings
 -KeepExisting                    # never overwrite a save that exists
--NoGlobal                        # skip Ubisoft/Goldberg/scene-wide folders
+-NoGlobal                        # skip launcher-wide / crack / emulator folders
 -Keep 8                          # how many snapshots to keep
 -Drive C: -AllDrives             # deep-scan only: which drive(s) to search
 -MaxDepth 12 -MaxResults 500     # deep-scan only: folder depth and hit limit
 -NoSize                         # deep-scan only: skip file counting (much faster)
 -Backup                         # deep-scan / discover: snapshot everything found
--From / -To <emu>               # migrate only: eden, eglantine, ryujinx, kyty, shadps4
--Title <id>                     # migrate only: one title id (0100… or PPSA…)
+-From / -To <emu>               # migrate only: source and target emulator
+-Title <id>                     # migrate only: one title id
 -RestoreFormat profile|verbatim|folder   # restore layout (default: profile)
 -RestoreRoot <folder>           # folder format: <folder>\<TOKEN>\<relative path>
 -SavePattern *.sav,*.dat        # rule-add: which files are saves
@@ -165,17 +190,16 @@ Common switches:
 Examples:
 
 ```powershell
-# search the whole C: drive for save folders (CPY / GSE / Goldberg / scene remote / UWP / LocalLow)
+# search the whole C: drive for save folders (crack, Steam-emulator, UWP, LocalLow)
 .\GameSaveVault.ps1 deep-scan -Drive C: -NoSize
 
 # same, then back everything up into G:\GameSaveVault
 .\GameSaveVault.ps1 deep-scan -AllDrives -MaxDepth 12 -Backup
 
-# copy Switch saves from Eden to Ryujinx (matches by title id, remaps the
-# profile id, and moves any overwritten save to the vault rollback folder)
-.\GameSaveVault.ps1 migrate -From eden -To ryujinx
-.\GameSaveVault.ps1 migrate -From eden -To eglantine -Title 0100000000010000 -DryRun
-.\GameSaveVault.ps1 migrate -From kyty -To shadps4 -DryRun
+# copy console-emulator saves between emulators (matches by title id, remaps
+# the profile id, and moves any overwritten save to the vault rollback folder)
+.\GameSaveVault.ps1 migrate -From <source> -To <target>
+.\GameSaveVault.ps1 migrate -From <source> -To <target> -Title <title-id> -DryRun
 
 # back up only two games
 .\GameSaveVault.ps1 backup -Game "Skyrim","Palworld"
@@ -194,7 +218,7 @@ Examples:
 
 # save rules: portable paths that survive a new drive letter / new Windows user
 .\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav -InstallDir "My Game"
-.\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GSE Saves\1234" -SavePattern *.sav,*.dat
+.\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GameEmu\1234" -SavePattern *.sav,*.dat
 .\GameSaveVault.ps1 discover -Backup
 .\GameSaveVault.ps1 rule-export -File D:\rules.json
 
@@ -207,7 +231,7 @@ Examples:
 
 ## Where PC games actually keep saves
 
-This is the map the scanner uses. Repacks do **not** move saves — a FitGirl/DODI/ElAmigos repack is just a compressed installer of the original game files, so the game still writes to its normal folders.
+This is the map the scanner uses. Repacks do **not** move saves — a repack is just a compressed installer of the original game files, so the game still writes to its normal folders.
 
 | Location | Typical games / engines |
 |---|---|
@@ -223,78 +247,58 @@ This is the map the scanner uses. Repacks do **not** move saves — a FitGirl/DO
 | Inside the game folder (`Save`, `Saves`, `SaveData`, `Profile`, `Profiles`) | older games and some cracks |
 | Registry (`HKCU\Software\<Game>`) | a few games store keybinds/profile there |
 
-### FitGirl / DODI / ElAmigos / crack games specifically
+### Repack, crack and Steam-emulator games
 
-- The repack name (`[FitGirl Repack]`, `[DODI Repack]`, `ElAmigos`) is ignored when matching, so `Expeditions A MudRunner Game [DODI Repack]` still matches the real game.
+- Repack names and tags are ignored when matching, so `Expeditions A MudRunner Game [Repack]` still matches the real game.
 - Saves stay in the original game's paths — `Documents\My Games\...`, `AppData\...`, etc.
-- If the repack ships a Steam emulator, saves can instead be in:
-  - `%APPDATA%\Goldberg SteamEmu Saves\<appid>\remote`
-  - `%APPDATA%\GSE Saves\<appid>\remote`  (GSE = Goldberg SteamEmu / EmulGBE saves)
-  - `%LOCALAPPDATA%\GSE Saves\...`, `%PROGRAMDATA%\GSE Saves\...`
-  - `%APPDATA%\SmartSteamEmu\<appid>`
-  - `<game folder>\steam_settings` (config)
-- Scene groups (CODEX, RUNE, PLAZA, ALI213, EMPRESS, SKIDROW, RELOADED, 3DM, HOODLUM, FLT, RAZOR1911, TENOKE, PROPHET):
-  - `C:\Users\Public\Documents\Steam\CODEX\<appid>\remote`
-  - `C:\Users\Public\Documents\Steam\RUNE\<appid>`, `\PLAZA\<appid>`, `\ALI213\<appid>`
-  - `C:\Users\Public\Documents\EMPRESS\<appid>`
-  - `C:\ProgramData\Steam\CODEX\<appid>`
-  - `Documents\CPY_SAVES\<appid>`, `%APPDATA%\SKIDROW\...`, `%APPDATA%\RELOADED\...`, `%APPDATA%\3DMGAME\...`
-- Not every game on this list has a catalog entry — that is exactly what `deep-scan` is for. It walks the drive and reports every folder that looks like a save location, including `eden` (Switch emulator) Nintendo save trees, UWP/Xbox `Packages\...\SystemAppData\wgs` containers, and Unity `LocalLow\<company>\<product>` folders.
+- If the release ships a Steam emulator, saves can instead be in one of the usual emulator save folders under `%APPDATA%`, `%LOCALAPPDATA%` or `%PROGRAMDATA%`, keyed by AppID.
+- Crack / scene releases often keep saves in a shared folder such as `%PUBLICDOCS%\Steam\<group>\<appid>`, `%PROGRAMDATA%\Steam\<group>\<appid>`, or `Documents\<group>_SAVES\<appid>`.
+- Older cracks put saves inside the install folder (`Profile`, `SaveData`, `Saves`), which the scanner also checks.
+- Not every game has a catalog entry — that is exactly what `deep-scan` is for. It walks the drive and reports every folder that looks like a save location, including console-emulator save trees, UWP/Xbox `Packages\...\SystemAppData\wgs` containers, and Unity `LocalLow\<company>\<product>` folders.
 
 #### Jump Force example
 
-Jump Force stores its story save in the scene release folder:
+Jump Force stores its story save in a shared crack/scene folder:
 
 ```
-C:\Users\Public\Documents\Steam\CODEX\816020\remote\jfsavedata.dat
+C:\Users\Public\Documents\Steam\<group>\816020\remote\jfsavedata.dat
 ```
 
-The `deep-scan` found it and backed it up (AppId `816020`). The game also has a catalog entry with `%LOCALAPPDATA%\JUMP FORCE\Saved\SaveGames`, `%STEAMUSERDATA%\816020\remote`, `CPY_SAVES\816020`, `GSE Saves\816020` and Goldberg paths, so normal `scan`/`backup` will find the save as soon as any of those folders exist.
+The `deep-scan` found it and backed it up (AppId `816020`). The game also has a catalog entry for its normal per-user, Steam userdata and emulator/crack folders, so normal `scan`/`backup` will find the save as soon as any of those folders exist.
 
-### Console emulator saves (Switch & PlayStation) and migration
+### Console emulator saves and migration
 
 Big console emulators keep saves **outside** the game folder, keyed by a *title ID* instead of a game name. The scanner enumerates every title, so `scan` lists them under **Console emulator saves**, and `backup` includes them.
 
-| Emulator(s) | Console | Save roots (relative to the emulator data folder) |
+| Emulator family | Console | Save roots (relative to the emulator data folder) |
 |---|---|---|
-| **Eden**, **Eglantine**, Yuzu, Suyu | Nintendo Switch | `nand\user\save\<profile>\<titleID>` and `nand\system\save\<profile>\<titleID>` (title ID = 16 hex digits) |
-| **Ryujinx** | Nintendo Switch | `bis\user\save\<profile>\<titleID>` and `bis\system\save\<profile>\<titleID>` |
-| **Kyty / KytyPS5** | PlayStation 5 | `_SaveData\PPSA…` **next to the emulator exe** (portable — the install folder can be called anything) |
-| **shadPS4** | PlayStation 4 | `user\<profile>\savedata\<CUSA…>` |
+| Switch emulators | Nintendo Switch | `nand\user\save\<profile>\<titleID>` / `nand\system\save\<profile>\<titleID>` or `bis\user\save\<profile>\<titleID>` / `bis\system\save\<profile>\<titleID>` (title ID = 16 hex digits) |
+| PlayStation 5 emulators | PlayStation 5 | `_SaveData\PPSA…` **next to the emulator exe** (portable — the install folder can be called anything) |
+| PlayStation 4 emulators | PlayStation 4 | `user\<profile>\savedata\<CUSA…>` |
 
-Data folders are probed in `%APPDATA%\<emulator>` and `%LOCALAPPDATA%\<emulator>`, plus a shallow walk of every drive for portable installs (any folder named `eden` / `eglantine` / `ryujinx` / `yuzu` / `suyu` / `kyty` / `shadps4`, or any `_SaveData` folder — Recycle Bins, caches and system folders are skipped).
+Data folders are probed in `%APPDATA%\<emulator>` and `%LOCALAPPDATA%\<emulator>`, plus a shallow walk of every drive for portable installs (any folder that looks like an emulator data folder, or any `_SaveData` folder — Recycle Bins, caches and system folders are skipped).
 
 #### Migrating saves between emulators
 
-Switch saves are stored the way the game wrote them, so moving between Eden / Eglantine / Ryujinx is a folder copy matched by title ID. The profile ID is remapped to the destination's own, and any save that would be overwritten is moved to `vault\rollback\<timestamp>\` first.
+Switch saves are stored the way the game wrote them, so moving between Switch emulators is a folder copy matched by title ID. The profile ID is remapped to the destination's own, and any save that would be overwritten is moved to `vault\rollback\<timestamp>\` first.
 
 ```powershell
 # see what would happen first
-.\GameSaveVault.ps1 migrate -From eden -To ryujinx -DryRun
+.\GameSaveVault.ps1 migrate -From <source> -To <target> -DryRun
 
 # copy everything, or just one title
-.\GameSaveVault.ps1 migrate -From eden -To ryujinx
-.\GameSaveVault.ps1 migrate -From eden -To eglantine -Title 0100000000010000
-
-# PS5/PS4: Kyty stores its saves in _SaveData\PPSA… ; move them to shadPS4
-.\GameSaveVault.ps1 migrate -From kyty -To shadps4
+.\GameSaveVault.ps1 migrate -From <source> -To <target>
+.\GameSaveVault.ps1 migrate -From <source> -To <target> -Title <title-id>
 ```
 
 Notes:
 
 - The destination emulator must be installed and must have launched once (its save folder has to exist).
-- PS4/PS5 **game files are never copied** — only save data. Kyty's shader caches (`_PipelineCache`) are skipped; you can re-download/recompile them.
-- Kyty/Eglantine installs that live on another drive (for example `D:\KytyPS5\_SaveData\PPSA21567`) are restored to the **same drive path**, because there is no per-user token to anchor them to. The AppData-based emulators (Eden, Ryujinx, Eglantine, shadPS4) restore into the *new* Windows profile, like every other save.
+- Console **game files are never copied** — only save data. Shader caches are skipped; you can re-download/recompile them.
+- Portable emulators that live on another drive are restored to the **same drive path**, because there is no per-user token to anchor them to. AppData-based emulators restore into the *new* Windows profile, like every other save.
 - The GUI has a **Migrate…** button with From/To dropdowns and a per-title checkbox list.
-- Scene-style releases often use:
-  - `%PUBLIC%\Documents\Steam\CODEX\<appid>`
-  - `%PUBLIC%\Documents\Steam\RUNE\<appid>`
-  - `%PUBLIC%\Documents\Steam\ALI213\<appid>`
-  - `%PUBLIC%\Documents\EMPRESS\<appid>`
-  - `%PROGRAMDATA%\Steam\CODEX\<appid>`
-- Older cracks put saves inside the install folder (`Profile`, `SaveData`, `Saves`, `ALI213`), which the scanner also checks.
 
-The app backs up **all** of the emulator/scene roots above as "Global launcher / emulator saves" even when it cannot identify which game they belong to.
+The app backs up **all** of the emulator/crack roots above as "Global launcher / emulator saves" even when it cannot identify which game they belong to.
 
 ### Denuvo and other DRM
 
@@ -326,7 +330,7 @@ For every installed game the tool combines:
    - `LocalLow\<company>\<product>` (Unity)
    - `Save`/`Saves`/`SaveData`/`Profile`/`Profiles` inside the install folder
    - Steam userdata for the game's AppID
-   - Goldberg / SmartSteamEmu / CODEX / RUNE / ALI213 / EMPRESS folders
+   - common Steam-emulator and crack save folders
 7. **Save rules** — your own entries from `config\save-rules.json` (see below). A rule can add paths the catalog does not know, and it carries the restore strategy.
 8. **Name matching** strips repack tags, version numbers and edition words, then compares word tokens (so `Skyrim Special Edition` matches `The Elder Scrolls V: Skyrim Special Edition`).
 
@@ -376,7 +380,7 @@ If a `gamedir` rule cannot find the game, restore falls back to the token view i
 .\GameSaveVault.ps1 rule-add "My Game" -Paths "D:\Games\My Game\Saves" -SavePattern *.sav -InstallDir "My Game"
 
 # token paths and emulator/crack folders are kept as written
-.\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GSE Saves\1234" -SavePattern *.sav,*.dat
+.\GameSaveVault.ps1 rule-add "My Game" -Paths "%LOCALAPPDATA%\MyGame\Saved","%APPDATA%\GameEmu\1234" -SavePattern *.sav,*.dat
 
 # see what each rule finds on this PC (and optionally snapshot it)
 .\GameSaveVault.ps1 discover
@@ -514,6 +518,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\selftest-rules.ps1
 GameSaveVault\
   GameSaveVault.ps1              CLI entry point
   GameSaveVault-GUI.ps1          WinForms app (PowerShell + System.Windows.Forms)
+  Install-GameSaveVault.ps1      one-line installer for the GitHub release
   Install.ps1                    desktop/start-menu shortcut + optional task
   Register-ScheduledBackup.ps1   daily backup task
   modules\
@@ -530,8 +535,8 @@ GameSaveVault\
     selftest.ps1                 backup + restore round-trip
     selftest-windowsold.ps1      Windows.old import + restore
     selftest-newos.ps1           Steam AppId scan -> save -> restore to a new OS
-    selftest-deepscan.ps1        CPY/GSE/Goldberg/scene/UWP deep scan
-    selftest-emulators.ps1       Eden / Ryujinx / Eglantine / Kyty (_SaveData) / shadPS4 scan + migrate
+    selftest-deepscan.ps1        crack / Steam-emulator / UWP deep scan
+    selftest-emulators.ps1       console-emulator scan + migrate
     selftest-formats.ps1         profile / verbatim / folder restore formats
     selftest-rules.ps1           tokenize -> save -> discover -> new-PC restore -> import/export
   .gitignore
@@ -542,6 +547,6 @@ GameSaveVault\
 
 ## Notes
 
-- Use this with games you own. The tool only copies save data; it does not provide game files, cracks or DRM bypasses.
+- Works with **any games**, including **crack games and emulators**. Use it with games you own. The tool only copies save data; it does not provide game files, cracks or DRM bypasses.
 - The first scan can take a few seconds because it walks `AppData`, `LocalLow` and `Documents`. Later runs are similar; there is no background service.
 - Backups are plain files — you can open the vault in Explorer and copy it to another disk or cloud drive yourself.
