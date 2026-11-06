@@ -120,6 +120,7 @@ powershell -ExecutionPolicy Bypass -File .\Install.ps1 -ScheduledTask -Time 21:3
 |---|---|
 | `scan` | Detect installed games and the save folders found (default). `-Detailed` prints every path. |
 | `deep-scan` | Search a whole drive for save folders the normal scan may miss (aliases: `deepscan`, `deep`, `search`). `-Drive C:`, `-AllDrives`, `-MaxDepth 12`, `-MaxResults 500`, `-NoSize`, `-Backup`. |
+| `migrate` | Copy console-emulator saves between emulators: `-From eden -To ryujinx`, `-From kyty`, `-Title <id>`, `-DryRun`. |
 | `backup` | Snapshot saves into the vault. `-All` includes launcher-wide/emulator folders. `-Game Skyrim,Palworld` limits it. |
 | `restore` | Restore the latest or a named snapshot. `-DryRun`, `-Game`, `-KeepExisting`, `-SkipRegistry`. |
 | `from-old` | Import + restore saves from `C:\Windows.old`. `-DryRun`, `-NoRestore`, `-WindowsOldRoot`. |
@@ -145,6 +146,8 @@ Common switches:
 -MaxDepth 12 -MaxResults 500     # deep-scan only: folder depth and hit limit
 -NoSize                         # deep-scan only: skip file counting (much faster)
 -Backup                         # deep-scan only: snapshot everything found
+-From / -To <emu>               # migrate only: eden, eglantine, ryujinx, kyty, shadps4
+-Title <id>                     # migrate only: one title id (0100… or PPSA…)
 ```
 
 Examples:
@@ -155,6 +158,12 @@ Examples:
 
 # same, then back everything up into G:\GameSaveVault
 .\GameSaveVault.ps1 deep-scan -AllDrives -MaxDepth 12 -Backup
+
+# copy Switch saves from Eden to Ryujinx (matches by title id, remaps the
+# profile id, and moves any overwritten save to the vault rollback folder)
+.\GameSaveVault.ps1 migrate -From eden -To ryujinx
+.\GameSaveVault.ps1 migrate -From eden -To eglantine -Title 0100000000010000 -DryRun
+.\GameSaveVault.ps1 migrate -From kyty -To shadps4 -DryRun
 
 # back up only two games
 .\GameSaveVault.ps1 backup -Game "Skyrim","Palworld"
@@ -219,6 +228,42 @@ C:\Users\Public\Documents\Steam\CODEX\816020\remote\jfsavedata.dat
 ```
 
 The `deep-scan` found it and backed it up (AppId `816020`). The game also has a catalog entry with `%LOCALAPPDATA%\JUMP FORCE\Saved\SaveGames`, `%STEAMUSERDATA%\816020\remote`, `CPY_SAVES\816020`, `GSE Saves\816020` and Goldberg paths, so normal `scan`/`backup` will find the save as soon as any of those folders exist.
+
+### Console emulator saves (Switch & PlayStation) and migration
+
+Big console emulators keep saves **outside** the game folder, keyed by a *title ID* instead of a game name. The scanner enumerates every title, so `scan` lists them under **Console emulator saves**, and `backup` includes them.
+
+| Emulator(s) | Console | Save roots (relative to the emulator data folder) |
+|---|---|---|
+| **Eden**, **Eglantine**, Yuzu, Suyu | Nintendo Switch | `nand\user\save\<profile>\<titleID>` and `nand\system\save\<profile>\<titleID>` (title ID = 16 hex digits) |
+| **Ryujinx** | Nintendo Switch | `bis\user\save\<profile>\<titleID>` and `bis\system\save\<profile>\<titleID>` |
+| **Kyty / KytyPS5** | PlayStation 5 | `_SaveData\PPSA…` **next to the emulator exe** (portable — the install folder can be called anything) |
+| **shadPS4** | PlayStation 4 | `user\<profile>\savedata\<CUSA…>` |
+
+Data folders are probed in `%APPDATA%\<emulator>` and `%LOCALAPPDATA%\<emulator>`, plus a shallow walk of every drive for portable installs (any folder named `eden` / `eglantine` / `ryujinx` / `yuzu` / `suyu` / `kyty` / `shadps4`, or any `_SaveData` folder — Recycle Bins, caches and system folders are skipped).
+
+#### Migrating saves between emulators
+
+Switch saves are stored the way the game wrote them, so moving between Eden / Eglantine / Ryujinx is a folder copy matched by title ID. The profile ID is remapped to the destination's own, and any save that would be overwritten is moved to `vault\rollback\<timestamp>\` first.
+
+```powershell
+# see what would happen first
+.\GameSaveVault.ps1 migrate -From eden -To ryujinx -DryRun
+
+# copy everything, or just one title
+.\GameSaveVault.ps1 migrate -From eden -To ryujinx
+.\GameSaveVault.ps1 migrate -From eden -To eglantine -Title 0100000000010000
+
+# PS5/PS4: Kyty stores its saves in _SaveData\PPSA… ; move them to shadPS4
+.\GameSaveVault.ps1 migrate -From kyty -To shadps4
+```
+
+Notes:
+
+- The destination emulator must be installed and must have launched once (its save folder has to exist).
+- PS4/PS5 **game files are never copied** — only save data. Kyty's shader caches (`_PipelineCache`) are skipped; you can re-download/recompile them.
+- Kyty/Eglantine installs that live on another drive (for example `D:\KytyPS5\_SaveData\PPSA21567`) are restored to the **same drive path**, because there is no per-user token to anchor them to. The AppData-based emulators (Eden, Ryujinx, Eglantine, shadPS4) restore into the *new* Windows profile, like every other save.
+- The GUI has a **Migrate…** button with From/To dropdowns and a per-title checkbox list.
 - Scene-style releases often use:
   - `%PUBLIC%\Documents\Steam\CODEX\<appid>`
   - `%PUBLIC%\Documents\Steam\RUNE\<appid>`
@@ -348,6 +393,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\selftest.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\selftest-windowsold.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\selftest-deepscan.ps1
 powershell -ExecutionPolicy Bypass -File .\tests\selftest-newos.ps1
+powershell -ExecutionPolicy Bypass -File .\tests\selftest-emulators.ps1
 ```
 
 ---
@@ -363,15 +409,16 @@ GameSaveVault\
   modules\
     GSV.Core.psm1                discovery, tokens, catalog, Windows.old scan
     GSV.Vault.psm1               snapshot, restore, rollback, pruning
-  data\catalog.psd1              89 curated games and save paths
+  data\catalog.psd1              96 curated games and save paths
   config\settings.json           generated on first run (git-ignored)
   config\settings.example.json   sample settings
   config\games.custom.json       generated when you add games
   tests\
     selftest.ps1                 backup + restore round-trip
     selftest-windowsold.ps1      Windows.old import + restore
-    selftest-deepscan.ps1        CPY/GSE/Goldberg/scene/UWP deep scan
     selftest-newos.ps1           Steam AppId scan -> save -> restore to a new OS
+    selftest-deepscan.ps1        CPY/GSE/Goldberg/scene/UWP deep scan
+    selftest-emulators.ps1       Eden / Ryujinx / Eglantine / Kyty (_SaveData) / shadPS4 scan + migrate
   .gitignore
   LICENSE
 ```

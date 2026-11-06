@@ -236,7 +236,8 @@ function Get-GSVSteamUserDataRoot {
 }
 
 function Get-GSVCurrentSteamUserId {
-    $ud = Get-GSVSteamUserDataRoot
+    param([string]$UserDataRoot)
+    $ud = if ($UserDataRoot) { $UserDataRoot } else { Get-GSVSteamUserDataRoot }
     if (-not $ud) { return '' }
 
     $login = Join-Path $ud 'loginusers.vdf'
@@ -1349,6 +1350,14 @@ function Get-GSVWindowsOldLocations {
             & $add $emu.P $emu.N 'windows.old' 'Scene/emulator saves' 'scene'
         }
 
+        # 4b. Console emulator saves (eden / ryujinx / eglantine / kyty / shadPS4).
+        foreach ($loc in @(Get-GSVEmulatorSaveLocations -NoSize -TokenTable $table)) {
+            $key = ("{0}|{1}" -f $loc.Token, $loc.RelativePath).ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $all.Add($loc)
+        }
+
         # 5. Heuristic scan of AppData for save-like game folders.
         foreach ($pair in @(
             @{ Root = $prof.LocalAppData; Token = 'LOCALAPPDATA' },
@@ -1466,6 +1475,300 @@ function Get-GSVGlobalSaveLocations {
     return $final.ToArray()
 }
 
+#region ---------------------------------------------------------------- console emulators (Switch / PS5)
+
+# Save folders that the big console emulators keep outside the game folder.
+# These are *not* catalog games: per-game folders exist under a save root, keyed
+# by a title ID instead of a game name (16 hex digits for Nintendo Switch, a
+# PPSA/CUSA id for PlayStation). The functions below enumerate every one of
+# them so a normal backup covers them, and index them by title ID so saves can
+# be migrated between emulators (Eden <-> Ryujinx <-> Eglantine, Kyty <-> KytyPS5).
+
+function Get-GSVEmulatorDefinitions {
+    return @(
+        [pscustomobject]@{
+            Id = 'eden'; Name = 'Eden'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\eden', '%LOCALAPPDATA%\eden')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+        }
+        [pscustomobject]@{
+            Id = 'eglantine'; Name = 'Eglantine'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\eglantine', '%LOCALAPPDATA%\eglantine', '%APPDATA%\Eglantine', '%LOCALAPPDATA%\Eglantine')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+        }
+        [pscustomobject]@{
+            Id = 'ryujinx'; Name = 'Ryujinx'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\ryujinx', '%LOCALAPPDATA%\ryujinx', '%APPDATA%\Ryujinx', '%LOCALAPPDATA%\Ryujinx')
+            SaveRoots = @('bis\user\save', 'bis\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+        }
+        [pscustomobject]@{
+            Id = 'yuzu'; Name = 'Yuzu'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\yuzu', '%LOCALAPPDATA%\yuzu')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+        }
+        [pscustomobject]@{
+            Id = 'suyu'; Name = 'Suyu'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\suyu', '%LOCALAPPDATA%\suyu')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+        }
+        [pscustomobject]@{
+            Id = 'kyty'; Name = 'Kyty / KytyPS5'; Console = 'PlayStation 5'
+            DataDirPatterns = @('%APPDATA%\Kyty', '%APPDATA%\kyty', '%APPDATA%\KytyPS5', '%APPDATA%\kytyps5',
+                                '%LOCALAPPDATA%\Kyty', '%LOCALAPPDATA%\kyty', '%LOCALAPPDATA%\KytyPS5', '%LOCALAPPDATA%\kytyps5')
+            SaveRoots = @('_SaveData')
+            TitlePattern = '^(PPSA|CUSA)\d{4,6}$'; TitleNoun = 'PS5 title'
+        }
+        [pscustomobject]@{
+            Id = 'shadps4'; Name = 'shadPS4'; Console = 'PlayStation 4'
+            DataDirPatterns = @('%APPDATA%\shadPS4', '%LOCALAPPDATA%\shadPS4')
+            SaveRoots = @('user\*\savedata')
+            TitlePattern = '^(PPSA|CUSA)\d{4,6}$'; TitleNoun = 'PS4 title'
+        }
+    )
+}
+
+function Get-GSVEmulatorDirs {
+    param(
+        [string[]]$EmulatorIds,
+        [hashtable]$TokenTable,
+        [switch]$IncludePortable
+    )
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+
+    $defs = @(Get-GSVEmulatorDefinitions)
+    if ($EmulatorIds -and $EmulatorIds.Count -gt 0) {
+        $defs = @($defs | Where-Object { $EmulatorIds -contains $_.Id })
+    }
+
+    $found = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    # 1. standard per-user locations (%APPDATA% / %LOCALAPPDATA%)
+    foreach ($def in $defs) {
+        foreach ($pattern in @($def.DataDirPatterns)) {
+            foreach ($path in @(Resolve-GSVPathPattern -Pattern $pattern -TokenTable $TokenTable)) {
+                if (-not $path) { continue }
+                $key = ("{0}|{1}" -f $def.Id, $path.ToLowerInvariant())
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                $found.Add([pscustomobject]@{ Emulator = $def; DataDir = $path; Origin = 'appdata' })
+            }
+        }
+    }
+
+    # 2. portable installs: emulator folder anywhere next to an .exe, found by a
+    #    shallow walk of every drive root and the configured game folders.
+    if ($IncludePortable) {
+        $portableNames = @{
+            'eden' = 'eden'; 'eglantine' = 'eglantine'; 'ryujinx' = 'ryujinx'
+            'yuzu' = 'yuzu'; 'suyu' = 'suyu'; 'kyty' = 'kyty'; 'kytyps5' = 'kyty'
+            'shadps4' = 'shadps4'
+        }
+
+        $roots = New-Object System.Collections.Generic.List[string]
+        try {
+            foreach ($d in @(Get-GSVFixedDriveRoots)) { $roots.Add($d) }
+        } catch { }
+        try {
+            foreach ($g in @(Get-GSVSettings.GameScanRoots)) { if (Test-Path -LiteralPath $g) { $roots.Add($g) } }
+        } catch { }
+
+        $visited = 0
+        $queue = New-Object System.Collections.Queue
+        foreach ($r in $roots) { if ($r) { $queue.Enqueue([pscustomobject]@{ Path = $r.TrimEnd('\'); Depth = 0 }) } }
+
+        while ($queue.Count -gt 0) {
+            $node = $queue.Dequeue()
+            $path = [string]$node.Path
+            $depth = [int]$node.Depth
+            $visited++
+            if ($visited -gt 60000) { break }
+
+            $leaf = ''
+            try { $leaf = Split-Path -Leaf $path } catch { }
+            $lower = $leaf.ToLowerInvariant()
+            if ($script:DeepPruneNames -and ($script:DeepPruneNames -contains $lower)) { continue }
+            if ($lower -ieq '_savedata') {
+                # Kyty / KytyPS5 store saves in a portable _SaveData folder next
+                # to the exe, whatever the install folder is called.
+                $parentDir = ''
+                try { $parentDir = Split-Path -Parent $path } catch { }
+                $def = @($defs | Where-Object { $_.Id -eq 'kyty' }) | Select-Object -First 1
+                if ($def -and $parentDir) {
+                    $key = ("{0}|{1}" -f $def.Id, $parentDir.ToLowerInvariant())
+                    if (-not $seen.ContainsKey($key)) {
+                        $seen[$key] = $true
+                        $found.Add([pscustomobject]@{ Emulator = $def; DataDir = $parentDir; Origin = 'portable' })
+                    }
+                }
+            }
+            if ($portableNames.ContainsKey($lower)) {
+                $emuId = $portableNames[$lower]
+                $def = @($defs | Where-Object { $_.Id -eq $emuId }) | Select-Object -First 1
+                if ($def) {
+                    $key = ("{0}|{1}" -f $def.Id, $path.ToLowerInvariant())
+                    if (-not $seen.ContainsKey($key)) {
+                        $seen[$key] = $true
+                        $found.Add([pscustomobject]@{ Emulator = $def; DataDir = $path; Origin = 'portable' })
+                    }
+                }
+            }
+
+            if ($depth -ge 4) { continue }
+            try {
+                foreach ($child in [System.IO.Directory]::EnumerateDirectories($path)) {
+                    $queue.Enqueue([pscustomobject]@{ Path = $child; Depth = $depth + 1 })
+                }
+            } catch { }
+        }
+    }
+
+    return $found.ToArray()
+}
+
+function Get-GSVEmulatorSaveIndex {
+    param(
+        [string[]]$EmulatorIds,
+        [hashtable]$TokenTable,
+        [switch]$IncludePortable
+    )
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+
+    foreach ($hit in @(Get-GSVEmulatorDirs -EmulatorIds $EmulatorIds -TokenTable $TokenTable -IncludePortable:$IncludePortable)) {
+        $def = $hit.Emulator
+
+        foreach ($relRoot in @($def.SaveRoots)) {
+            $saveRoot = $relRoot -replace '/', '\'
+            if ($saveRoot -match '\*') {
+                $keep = @()
+                foreach ($seg in ($saveRoot -split '\\')) {
+                    if ($seg -match '\*') { break }
+                    $keep += $seg
+                }
+                $base = $keep -join '\'
+                $rootDir = Join-Path $hit.DataDir $base
+                if (-not (Test-Path -LiteralPath $rootDir)) { continue }
+                foreach ($userDir in @(Get-ChildItem -LiteralPath $rootDir -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($leaf in @('savedata', 'SaveData', 'saveData', 'Savedata')) {
+                        $candidate = Join-Path $userDir.FullName $leaf
+                        if (Test-Path -LiteralPath $candidate) {
+                            Add-GSVEmulatorSaveEntries -Rows $rows -Def $def -DataDir $hit.DataDir -SaveRoot $candidate -Origin $hit.Origin
+                        }
+                    }
+                }
+            } else {
+                $candidate = Join-Path $hit.DataDir $saveRoot
+                if (Test-Path -LiteralPath $candidate) {
+                    Add-GSVEmulatorSaveEntries -Rows $rows -Def $def -DataDir $hit.DataDir -SaveRoot $candidate -Origin $hit.Origin
+                }
+            }
+        }
+    }
+
+    # De-duplicate: on a case-insensitive file system, savedata/SaveData/saveData
+    # all point at the same folder.
+    $seen = @{}
+    $final = New-Object System.Collections.Generic.List[object]
+    foreach ($row in $rows) {
+        $key = ("{0}|{1}|{2}" -f $row.EmulatorId, $row.TitleId, ([string]$row.Path).ToLowerInvariant())
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $final.Add($row)
+    }
+
+    return $final.ToArray()
+}
+
+function Add-GSVEmulatorSaveEntries {
+    param(
+        [System.Collections.Generic.List[object]]$Rows,
+        $Def,
+        [string]$DataDir,
+        [string]$SaveRoot,
+        [string]$Origin
+    )
+
+    # PS5/PS4 style: SaveRoot\<PPSA…\ or <CUSA…\
+    $addedFlat = $false
+    $flatTitles = @(Get-ChildItem -LiteralPath $SaveRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $Def.TitlePattern })
+    foreach ($title in $flatTitles) {
+        # A Switch profile folder (SaveRoot\<profile>\<title>) also matches the
+        # 16-hex pattern. If a child holds title folders itself, it is a
+        # profile container, not a title, so leave it to the 2-level pass.
+        $nested = @(Get-ChildItem -LiteralPath $title.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $Def.TitlePattern })
+        if ($nested.Count -gt 0) { continue }
+
+        $addedFlat = $true
+        $Rows.Add([pscustomobject]@{
+            EmulatorId = $Def.Id; EmulatorName = $Def.Name; Console = $Def.Console
+            TitleId = $title.Name; ProfileId = ''; Path = $title.FullName
+            DataDir = $DataDir; SaveRoot = $SaveRoot; Origin = $Origin
+        })
+    }
+    if ($addedFlat) { return }
+
+    # Switch style: SaveRoot\<profile>\<title>
+    foreach ($profile in @(Get-ChildItem -LiteralPath $SaveRoot -Directory -ErrorAction SilentlyContinue)) {
+        foreach ($title in @(Get-ChildItem -LiteralPath $profile.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $Def.TitlePattern })) {
+            $Rows.Add([pscustomobject]@{
+                EmulatorId = $Def.Id; EmulatorName = $Def.Name; Console = $Def.Console
+                TitleId = $title.Name; ProfileId = $profile.Name; Path = $title.FullName
+                DataDir = $DataDir; SaveRoot = $SaveRoot; Origin = $Origin
+            })
+        }
+    }
+}
+
+function Get-GSVEmulatorSaveLocations {
+    param(
+        $Settings,
+        [switch]$NoSize,
+        [hashtable]$TokenTable
+    )
+    if (-not $Settings) { $Settings = Get-GSVSettings }
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+
+    $locations = New-Object System.Collections.Generic.List[object]
+
+    foreach ($row in @(Get-GSVEmulatorSaveIndex -TokenTable $TokenTable -IncludePortable)) {
+        $anchor = Get-GSVPathAnchor -ResolvedPath $row.Path -TokenTable $TokenTable
+        $size = $null
+        if (-not $NoSize) { $size = Measure-GSVPathSize -Path $row.Path }
+
+        $locations.Add([pscustomobject]@{
+            GameId         = 'emu-' + $row.EmulatorId + '-' + (ConvertTo-GSVNormalName -Name $row.TitleId)
+            GameName       = ("{0} title {1}" -f ($row.Console -replace 'Nintendo ', '' -replace 'PlayStation ', 'PS'), $row.TitleId)
+            Source         = $row.EmulatorName
+            AppId          = [string]$row.TitleId
+            InstallDirHint = ''
+            Token          = $anchor.Token
+            RelativePath   = $anchor.Relative
+            AbsolutePath   = $anchor.Absolute
+            ResolvedPath   = $row.Path
+            Kind           = 'Directory'
+            Note           = ("{0}: {1}" -f $row.EmulatorName, $row.SaveRoot)
+            Origin         = 'emulator'
+            Exists         = $true
+            FileCount      = if ($size) { $size.Files } else { $null }
+            Bytes          = if ($size) { $size.Bytes } else { $null }
+        })
+    }
+
+    return $locations.ToArray()
+}
+
+#endregion
+
 #region ---------------------------------------------------------------- deep C: scan
 
 $script:DeepPruneNames = @(
@@ -1482,7 +1785,8 @@ $script:DeepPruneNames = @(
 $script:DeepContainerNames = @(
     'cpy_saves','cpy saves','gse saves','gse_saves','goldberg steamemu saves',
     'smartsteamemu','reloaded','skidrow','3dmgame','ali213','empress','codex',
-    'plaza','rune','prophet','hoodlum','flt','tenoke','razor1911','steamrip'
+    'plaza','rune','prophet','hoodlum','flt','tenoke','razor1911','steamrip',
+    '_savedata','savedata'
 )
 
 $script:DeepSaveFolderNames = @(
@@ -1746,6 +2050,18 @@ function Get-GSVDeepScanLocations {
             continue
         }
 
+        # 1c. PS4/PS5 emulator title folder: _SaveData\<PPSA…\ or <CUSA…\
+        if (($parentLeaf -ieq '_savedata' -or $parentLeaf -ieq 'savedata') -and $leaf -match '^(PPSA|CUSA)\d{4,6}$') {
+            & $add $path 'deep scan: console emulator title save' ("PS title " + $leaf) $leaf
+            continue
+        }
+
+        # 1d. Switch emulator title folder: nand\user\save\<profile>\<titleID> (or bis\…)
+        if ($leaf -match '^[0-9a-fA-F]{16}$' -and $parentLeaf -match '^[0-9a-fA-F]{16}$' -and $grandLeaf -ieq 'save') {
+            & $add $path 'deep scan: Switch emulator title save' ("Switch title " + $leaf) $leaf
+            continue
+        }
+
         # 2. Public/ProgramData Steam container (scene groups live inside)
         if ($leafLower -eq 'steam' -and (
                 ($parentLeaf -ieq 'Documents' -and $grandLeaf -ieq 'Public') -or
@@ -1803,7 +2119,10 @@ function Get-GSVDeepScanLocations {
         }
 
         # 8. folders literally named Save / Saves / SaveGames / SaveData
-        if ($script:DeepSaveFolderNames -contains $leafLower) {
+        #    (except Switch save roots nand\user\save, which are handled per
+        #     title by 1d — descending into them is what we want)
+        $isSwitchSaveRoot = ($leafLower -eq 'save' -and $parentLeaf -ieq 'user' -and ($grandLeaf -ieq 'nand' -or $grandLeaf -ieq 'bis'))
+        if (($script:DeepSaveFolderNames -contains $leafLower) -and -not $isSwitchSaveRoot) {
             & $add $path ('deep scan: ' + $leaf + ' folder') (Get-GSVDeepGameName -Path $path) ''
             continue
         }

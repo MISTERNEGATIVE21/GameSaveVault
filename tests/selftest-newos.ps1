@@ -124,7 +124,7 @@ try {
         @{ T = 'PUBLICDOCS';    R = 'Steam\CODEX\816020' }
         @{ T = 'PUBLICDOCS';    R = 'Steam\RUNE\816020' }
         @{ T = 'PROGRAMDATA';   R = 'Steam\CODEX\816020' }
-        @{ T = 'LOCALAPPDATA';  R = 'JUMP FORCE\Saved\SaveGames' }
+        @{ T = 'LOCALAPPDATA';  R = 'JUMP FORCE' }
     )
     foreach ($m in $must) {
         $key = "{0}|{1}" -f $m.T, $m.R
@@ -157,10 +157,10 @@ try {
     Assert-True ($snap.EntryCount -ge 6) ("snapshot should have >=6 entries, got {0}" -f $snap.EntryCount)
     Assert-True (-not [string]::IsNullOrWhiteSpace($snap.SnapshotPath)) 'snapshot path must be set'
 
-    $noToken = @($snap.Entries | Where-Object { $_.Kind -ne 'Registry' -and -not $_.Token })
+    $noToken = @($snap.Manifest.Entries | Where-Object { $_.Kind -ne 'Registry' -and -not $_.Token })
     Assert-True ($noToken.Count -eq 0) ("Steam saves must have a token anchor, not an absolute path ({0} bad)" -f $noToken.Count)
 
-    $steamEntries = @($snap.Entries | Where-Object { $_.Token -eq 'STEAMUSERDATA' })
+    $steamEntries = @($snap.Manifest.Entries | Where-Object { $_.Token -eq 'STEAMUSERDATA' })
     Assert-True ($steamEntries.Count -ge 1) 'snapshot must contain a STEAMUSERDATA entry'
     if ($steamEntries.Count -ge 1) {
         Assert-True ($steamEntries[0].AppId -eq $appid) ("STEAMUSERDATA AppId must be {0}, got '{1}'" -f $appid, $steamEntries[0].AppId)
@@ -213,7 +213,7 @@ try {
     Assert-True ((Get-Content-Under -Base (Join-Path $sandbox 'NEWOS\Users\Public\Documents') -Relative 'Steam\CODEX\816020\remote\jfsavedata.dat') -eq 'old-codex') 'CODEX scene save must restore to Public\Documents'
     Assert-True ((Get-Content-Under -Base (Join-Path $sandbox 'NEWOS\Users\Public\Documents') -Relative 'Steam\RUNE\816020\remote\save.dat') -eq 'old-rune') 'RUNE scene save must restore'
     Assert-True ((Get-Content-Under -Base (Join-Path $sandbox 'NEWOS\ProgramData') -Relative 'Steam\CODEX\816020\remote\save.dat') -eq 'old-codex-pd') 'ProgramData scene save must restore'
-    Assert-True ((Get-Content-Under -Base (Join-Path $newProfile 'AppData\Local') -Relative 'JUMP FORCE\Saved\SaveGames\slot.sav') -eq 'old-ue4') 'UE4 local save must restore'
+    Assert-True ((Get-Content-Under -Base (Join-Path $newProfile 'AppData\Local') -Relative 'JUMP FORCE\Saved\SaveGames\slot.sav') -eq 'old-ue4') 'UE4 local save must restore (inside the JUMP FORCE folder)'
 
     # ==========================================================================
     # 4. Idempotent restore

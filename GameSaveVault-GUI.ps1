@@ -27,6 +27,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $script:Root 'config\settings.json')
 $script:Vault = $script:Settings.BackupRoot
 $script:Games = @()
 $script:Global = @()
+$script:Emulators = @()
 
 #region ---------------------------------------------------------------- tiny dialogs
 
@@ -396,6 +397,117 @@ function Show-DeepScanDialog {
     $dlg.Dispose()
 }
 
+function Show-MigrateDialog {
+    $defs = @(Get-GSVEmulatorDefinitions)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Migrate console emulator saves'
+    $dlg.Size = New-Object System.Drawing.Size(880, 560)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.MinimizeBox = $false
+
+    $lblFrom = New-Object System.Windows.Forms.Label
+    $lblFrom.Text = 'From'
+    $lblFrom.Location = New-Object System.Drawing.Point(14, 14)
+    $lblFrom.Size = New-Object System.Drawing.Size(40, 20)
+
+    $cbFrom = New-Object System.Windows.Forms.ComboBox
+    $cbFrom.DropDownStyle = 'DropDownList'
+    $cbFrom.Location = New-Object System.Drawing.Point(56, 10)
+    $cbFrom.Size = New-Object System.Drawing.Size(280, 24)
+
+    $lblTo = New-Object System.Windows.Forms.Label
+    $lblTo.Text = 'To'
+    $lblTo.Location = New-Object System.Drawing.Point(350, 14)
+    $lblTo.Size = New-Object System.Drawing.Size(30, 20)
+
+    $cbTo = New-Object System.Windows.Forms.ComboBox
+    $cbTo.DropDownStyle = 'DropDownList'
+    $cbTo.Location = new-Object System.Drawing.Point(382, 10)
+    $cbTo.Size = New-Object System.Drawing.Size(280, 24)
+
+    foreach ($def in $defs) {
+        $label = "{0} ({1})" -f $def.Name, $def.Console
+        [void]$cbFrom.Items.Add($label)
+        [void]$cbTo.Items.Add($label)
+    }
+    $cbFrom.SelectedIndex = 0
+    $cbTo.SelectedIndex = 1
+
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.Dock = 'Fill'
+    $lv.View = 'Details'
+    $lv.CheckBoxes = $true
+    $lv.FullRowSelect = $true
+    $lv.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    [void]$lv.Columns.Add('Title ID', 220)
+    [void]$lv.Columns.Add('Profile', 150)
+    [void]$lv.Columns.Add('Save folder', 480)
+
+    $panel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $panel.Dock = 'Bottom'
+    $panel.Height = 48
+    $panel.Padding = New-Object System.Windows.Forms.Padding(8, 8, 8, 6)
+    $panel.WrapContents = $false
+
+    $btnRefresh = New-TopButton 'Refresh list' 100 'Re-scan the source emulator for saves'
+    $btnGo = New-TopButton 'Migrate checked' 130 'Copy the checked saves into the other emulator'
+    $btnClose = New-TopButton 'Close' 80
+
+    $script:MigrateEntries = @()
+
+    $btnRefresh.Add_Click({
+        $srcDef = $defs[$cbFrom.SelectedIndex]
+        $lv.Items.Clear()
+        $script:MigrateEntries = @(Get-GSVEmulatorSaveIndex -EmulatorIds @($srcDef.Id) -IncludePortable)
+        foreach ($e in ($script:MigrateEntries | Sort-Object TitleId)) {
+            $item = New-Object System.Windows.Forms.ListViewItem([string]$e.TitleId)
+            [void]$item.SubItems.Add([string]$e.ProfileId)
+            [void]$item.SubItems.Add([string]$e.Path)
+            $item.Tag = $e
+            $item.Checked = $true
+            [void]$lv.Items.Add($item)
+        }
+        if ($script:MigrateEntries.Count -eq 0) {
+            Show-Warn ("No saves found for {0}." -f $srcDef.Name)
+        }
+    })
+
+    $btnGo.Add_Click({
+        $srcDef = $defs[$cbFrom.SelectedIndex]
+        $dstDef = $defs[$cbTo.SelectedIndex]
+        if ($srcDef.Id -eq $dstDef.Id) { Show-Warn 'Source and destination are the same emulator.'; return }
+
+        $chosen = New-Object System.Collections.Generic.List[object]
+        foreach ($i in $lv.CheckedItems) { $chosen.Add($i.Tag) }
+        if ($chosen.Count -eq 0) { Show-Warn 'Nothing checked.'; return }
+
+        try {
+            $r = Copy-GSVEmulatorSaves -Entries $chosen.ToArray() -DestinationEmulatorId $dstDef.Id -BackupRoot $script:Vault
+            $msg = "Migration complete.`n`nFrom: $($srcDef.Name)`nTo: $($dstDef.Name)`nCopied: $($r.Migrated)`nSkipped: $($r.Skipped)`nFailed: $($r.Failed)"
+            if (@($r.Messages).Count -gt 0) { $msg += "`n`n" + (($r.Messages | Select-Object -First 5) -join "`n") }
+            Show-Info $msg 'Migration complete'
+            $statusLabel.Text = ("Migrated {0} save(s) to {1}" -f $r.Migrated, $dstDef.Name)
+            Load-Games
+        } catch {
+            Show-Error "Migration failed: $($_.Exception.Message)"
+        }
+    })
+
+    $btnClose.Add_Click({ $dlg.Close() })
+
+    $panel.Controls.AddRange(@($btnRefresh, $btnGo, $btnClose))
+    $dlg.Controls.Add($lv)
+    $dlg.Controls.Add($panel)
+    $dlg.Controls.Add($lblFrom)
+    $dlg.Controls.Add($cbFrom)
+    $dlg.Controls.Add($lblTo)
+    $dlg.Controls.Add($cbTo)
+
+    [void]$dlg.ShowDialog()
+    $dlg.Dispose()
+}
+
 #endregion
 
 #region ---------------------------------------------------------------- form
@@ -435,12 +547,13 @@ $btnBackupAll = New-TopButton 'Backup all' 100 'Back up every detected game'
 $btnRestore  = New-TopButton 'Restore...' 100 'Restore a snapshot from the vault'
 $btnOld      = New-TopButton 'Windows.old...' 120 'Recover saves from C:\Windows.old'
 $btnDeep     = New-TopButton 'Deep scan...' 110 'Search a whole drive for CPY / GSE / scene / Steam / UWP saves'
+$btnMigrate  = New-TopButton 'Migrate...' 90 'Copy console-emulator saves between emulators (Eden / Ryujinx / Eglantine / Kyty)'
 $btnAdd      = New-TopButton 'Add game...' 100 'Register a custom save folder'
 $btnVault    = New-TopButton 'Open vault' 100 'Open the backup folder'
 $btnVaultLoc = New-TopButton 'Backup location...' 150 'Choose where backups are stored (default vault folder)'
 $btnDoctor   = New-TopButton 'Doctor' 80 'Check vault health'
 
-$top.Controls.AddRange(@($btnScan, $btnBackup, $btnBackupAll, $btnRestore, $btnOld, $btnDeep, $btnAdd, $btnVault, $btnVaultLoc, $btnDoctor))
+$top.Controls.AddRange(@($btnScan, $btnBackup, $btnBackupAll, $btnRestore, $btnOld, $btnDeep, $btnMigrate, $btnAdd, $btnVault, $btnVaultLoc, $btnDoctor))
 
 $list = New-Object System.Windows.Forms.ListView
 $list.Dock = 'Fill'
@@ -510,6 +623,7 @@ function Load-Games {
     try {
         $script:Games = @(Get-GSVAllGames -Settings $script:Settings)
         $script:Global = @(Get-GSVGlobalSaveLocations -Settings $script:Settings -NoSize)
+        $script:Emulators = @(Get-GSVEmulatorSaveLocations -Settings $script:Settings -NoSize)
 
         $list.BeginUpdate()
         $list.Items.Clear()
@@ -523,6 +637,23 @@ function Load-Games {
             [void]$item.SubItems.Add((Format-GSVSize $bytes))
             [void]$item.SubItems.Add('Ubisoft Connect / Goldberg / scene release save folders')
             $item.Tag = [pscustomobject]@{ Name = 'Global launcher / emulator saves'; Source = 'Global'; Locations = $script:Global }
+            $item.Checked = $true
+            $item.Font = New-Object System.Drawing.Font($list.Font, [System.Drawing.FontStyle]::Bold)
+            [void]$list.Items.Add($item)
+        }
+
+        foreach ($group in @($script:Emulators | Group-Object Source | Sort-Object Name)) {
+            $groupLocs = @($group.Group)
+            $bytes = [int64]0
+            foreach ($l in $groupLocs) { $bytes += [int64](0 + $l.Bytes) }
+            $paths = @($groupLocs | ForEach-Object { $_.ResolvedPath })
+            $preview = ($paths | Select-Object -First 3) -join '; '
+            $item = New-Object System.Windows.Forms.ListViewItem(("{0} emulator saves ({1} titles)" -f $group.Name, $groupLocs.Count))
+            [void]$item.SubItems.Add('Emulator')
+            [void]$item.SubItems.Add([string]$groupLocs.Count)
+            [void]$item.SubItems.Add((Format-GSVSize $bytes))
+            [void]$item.SubItems.Add($preview)
+            $item.Tag = [pscustomobject]@{ Name = $group.Name; Source = 'Emulator'; Locations = $groupLocs }
             $item.Checked = $true
             $item.Font = New-Object System.Drawing.Font($list.Font, [System.Drawing.FontStyle]::Bold)
             [void]$list.Items.Add($item)
@@ -599,6 +730,10 @@ $btnDeep.Add_Click({
     Show-DeepScanDialog
 })
 
+$btnMigrate.Add_Click({
+    Show-MigrateDialog
+})
+
 $btnBackup.Add_Click({
     $locs = @(Get-CheckedLocations)
     Invoke-GuiBackup -Locations $locs -Label 'gui-selected'
@@ -608,6 +743,7 @@ $btnBackupAll.Add_Click({
     $locs = New-Object System.Collections.Generic.List[object]
     foreach ($g in $script:Games) { foreach ($l in @($g.Locations)) { $locs.Add($l) } }
     foreach ($l in $script:Global) { $locs.Add($l) }
+    foreach ($l in $script:Emulators) { $locs.Add($l) }
 
     $seen = @{}
     $unique = New-Object System.Collections.Generic.List[object]

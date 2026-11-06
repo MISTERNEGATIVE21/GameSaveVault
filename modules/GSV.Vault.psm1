@@ -402,7 +402,7 @@ function Resolve-GSVTargetPath {
         if ($parts.Count -ge 1 -and $parts[0] -match '^\d+$') {
             $existing = Join-Path $root $parts[0]
             if (-not (Test-Path -LiteralPath $existing)) {
-                $current = Get-GSVCurrentSteamUserId
+                $current = Get-GSVCurrentSteamUserId -UserDataRoot $root
                 if ($current) { $parts[0] = $current }
             }
         }
@@ -679,6 +679,134 @@ function Get-GSVVaultStats {
         RollbackBytes = $rollbackBytes
         Latest        = if ($snapshots.Count) { $snapshots[0] } else { $null }
         Snapshots     = $snapshots
+    }
+}
+
+#region ---------------------------------------------------------------- vault maintenance
+
+function Copy-GSVEmulatorSaves {
+    param(
+        [Parameter(Mandatory)][object[]]$Entries,
+        [Parameter(Mandatory)][string]$DestinationEmulatorId,
+        [hashtable]$TokenTable,
+        [string]$BackupRoot,
+        [switch]$DryRun
+    )
+    if (-not $TokenTable) { $TokenTable = Get-GSVTokenTable }
+
+    $def = @((Get-GSVEmulatorDefinitions) | Where-Object { $_.Id -eq $DestinationEmulatorId }) | Select-Object -First 1
+    if (-not $def) { throw "Unknown destination emulator: $DestinationEmulatorId" }
+
+    # Every save root the destination emulator currently has (so we can place a
+    # save next to its existing data instead of guessing a new folder).
+    $destDirs = @(Get-GSVEmulatorDirs -EmulatorIds @($DestinationEmulatorId) -TokenTable $TokenTable -IncludePortable)
+    if ($destDirs.Count -eq 0) {
+        throw "$($def.Name) was not found on this PC. Install it, or point GameScanRoots at its folder, then migrate again."
+    }
+
+    $destRoots = New-Object System.Collections.Generic.List[object]
+    foreach ($hit in $destDirs) {
+        foreach ($relRoot in @($def.SaveRoots)) {
+            $saveRoot = $relRoot -replace '/', '\'
+            if ($saveRoot -match '\*') {
+                $keep = @()
+                foreach ($seg in ($saveRoot -split '\\')) {
+                    if ($seg -match '\*') { break }
+                    $keep += $seg
+                }
+                $base = $keep -join '\'
+                $rootDir = Join-Path $hit.DataDir $base
+                if (-not (Test-Path -LiteralPath $rootDir)) { continue }
+                foreach ($userDir in @(Get-ChildItem -LiteralPath $rootDir -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($leaf in @('savedata', 'SaveData', 'saveData', 'Savedata')) {
+                        $candidate = Join-Path $userDir.FullName $leaf
+                        if (Test-Path -LiteralPath $candidate) {
+                            $destRoots.Add([pscustomobject]@{ DataDir = $hit.DataDir; SaveRoot = $candidate })
+                        }
+                    }
+                }
+            } else {
+                $candidate = Join-Path $hit.DataDir $saveRoot
+                if (Test-Path -LiteralPath $candidate) {
+                    $destRoots.Add([pscustomobject]@{ DataDir = $hit.DataDir; SaveRoot = $candidate })
+                }
+            }
+        }
+    }
+    if ($destRoots.Count -eq 0) {
+        throw "$($def.Name) is installed but its save folder does not exist yet. Launch it once, then migrate again."
+    }
+
+    $migrated = 0; $skipped = 0; $failed = 0
+    $messages = New-Object System.Collections.Generic.List[string]
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+
+    foreach ($entry in $Entries) {
+        $src = $entry.Path
+        if (-not $src -or -not (Test-Path -LiteralPath $src)) {
+            $messages.Add("missing source: $src")
+            $skipped++
+            continue
+        }
+
+        # Pick the matching destination save root: prefer the same subsystem
+        # (user saves vs system saves), then the first one available.
+        $destRoot = $destRoots[0].SaveRoot
+        foreach ($candidate in $destRoots) {
+            $candLeaf = Split-Path -Leaf $candidate.SaveRoot
+            $srcLeaf = Split-Path -Leaf $entry.SaveRoot
+            if ($candLeaf -ieq $srcLeaf) { $destRoot = $candidate.SaveRoot; break }
+        }
+        foreach ($candidate in $destRoots) {
+            if ($candidate.SaveRoot -match '(?i)\\user\\save$' -and $entry.SaveRoot -match '(?i)\\user\\save$') { $destRoot = $candidate.SaveRoot; break }
+        }
+
+        # Profile mapping: keep the source profile if the destination knows it,
+        # otherwise use the destination's own profile slot.
+        $profile = [string]$entry.ProfileId
+        if ($profile) {
+            $profileDir = Join-Path $destRoot $profile
+            if (-not (Test-Path -LiteralPath $profileDir)) {
+                $existing = @(Get-ChildItem -LiteralPath $destRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)
+                if ($existing.Count -gt 0) { $profile = $existing[0].Name }
+            }
+        }
+
+        $dest = if ($profile) { Join-Path (Join-Path $destRoot $profile) $entry.TitleId } else { Join-Path $destRoot $entry.TitleId }
+
+        if ($DryRun) {
+            Write-GSVLog -Level Info -Message ("[dry-run] migrate {0} -> {1}  [{2}]" -f $src, $dest, $entry.TitleId)
+            $migrated++
+            continue
+        }
+
+        try {
+            if (Test-Path -LiteralPath $dest) {
+                # The destination save is first moved to the rollback folder so
+                # a migration never destroys existing progress.
+                if ($BackupRoot) {
+                    $null = Move-GSVToRollback -Path $dest -BackupRoot $BackupRoot -Stamp $stamp
+                } else {
+                    Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            New-Item -ItemType Directory -Path $dest -Force | Out-Null
+            $settings = Get-GSVSettings
+            Invoke-GSVCopyTree -Source $src -Destination $dest -ExcludeDirs $settings.ExcludeNames -ExcludeFiles $settings.ExcludeFiles
+            $migrated++
+            Write-GSVLog -Level Success -Message ("migrated {0} -> {1}" -f $src, $dest)
+        } catch {
+            $failed++
+            $msg = "migrate '$src': $($_.Exception.Message)"
+            $messages.Add($msg)
+            Write-GSVLog -Level Error -Message $msg
+        }
+    }
+
+    return [pscustomobject]@{
+        Migrated = $migrated; Skipped = $skipped; Failed = $failed
+        Messages = $messages.ToArray(); Destination = $DestinationEmulatorId
     }
 }
 

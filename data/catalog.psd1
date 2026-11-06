@@ -397,6 +397,38 @@ Paths support these tokens:
             Paths = @('%LOCALAPPDATA%\AWayOut')
             RegistryKeys = @(); Notes = ''
         }
+        @{
+            Id = '007firstlight'; Name = '007 First Light'
+            Aliases = @('James Bond 007 First Light','First Light')
+            Engine = 'Glacier 2'; SteamAppIds = @(3768760)
+            Paths = @(
+                '%APPDATA%\IO Interactive\Epic',
+                '%APPDATA%\IO Interactive\007 First Light',
+                '%LOCALAPPDATA%\IO Interactive\007 First Light',
+                '%STEAMUSERDATA%\3768760',
+                '%APPDATA%\GSE Saves\3768760',
+                '%APPDATA%\Goldberg SteamEmu Saves\3768760',
+                '%DOCUMENTS%\CPY_SAVES\3768760',
+                '%PUBLICDOCS%\Steam\CODEX\3768760',
+                '%PUBLICDOCS%\Steam\RUNE\3768760'
+            )
+            RegistryKeys = @('HKCU\Software\IO Interactive\007 First Light'); Notes = 'Steam saves via userdata\3768760; Epic path has a per-account id subfolder.'
+        }
+        @{
+            Id = 'hitman3'; Name = 'HITMAN 3'
+            Aliases = @('Hitman 3','HITMAN 3')
+            Engine = 'Glacier 2'; SteamAppIds = @(1659040)
+            Paths = @(
+                '%APPDATA%\IO Interactive\HITMAN3',
+                '%LOCALAPPDATA%\IO Interactive\HITMAN3',
+                '%STEAMUSERDATA%\1659040',
+                '%APPDATA%\GSE Saves\1659040',
+                '%APPDATA%\Goldberg SteamEmu Saves\1659040',
+                '%PUBLICDOCS%\Steam\RUNE\1659040',
+                '%PUBLICDOCS%\Steam\CODEX\1659040'
+            )
+            RegistryKeys = @('HKCU\Software\IO Interactive\HITMAN3'); Notes = ''
+        }
 
         # ---------------- Strategy / simulation ----------------
         @{

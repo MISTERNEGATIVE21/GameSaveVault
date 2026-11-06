@@ -46,6 +46,12 @@ param(
 
     [string]$Label = '',
 
+    [string]$From = '',
+
+    [string]$To = '',
+
+    [string[]]$Title = @(),
+
     [int]$Keep = 0,
 
     [switch]$All,
@@ -163,6 +169,14 @@ function Show-Scan {
         foreach ($l in $global) { Write-Host ("    DIR  {0}   ({1})" -f $l.ResolvedPath, $l.Note) -ForegroundColor DarkGray }
     }
 
+    $emulators = @(Get-GSVEmulatorSaveLocations -Settings $settings -NoSize)
+    if ($emulators.Count -gt 0) {
+        Write-Host ''
+        Write-Host ("  Console emulator saves (Switch / PS5 / PS4): {0} title save(s)" -f $emulators.Count) -ForegroundColor DarkYellow
+        foreach ($l in $emulators) { Write-Host ("    DIR  {0}   ({1})" -f $l.ResolvedPath, $l.Note) -ForegroundColor DarkGray }
+        Write-Host '  Copy saves between emulators:  .\GameSaveVault.ps1 migrate -From eden -To ryujinx' -ForegroundColor DarkGray
+    }
+
     Write-Host ''
     Write-Kv 'Vault location' $vault 'Yellow'
     Write-Kv 'Games detected' $games.Count
@@ -192,6 +206,7 @@ function Invoke-Backup {
 
     if (-not $NoGlobal) {
         foreach ($l in @(Get-GSVGlobalSaveLocations -Settings $settings)) { $locations.Add($l) }
+        foreach ($l in @(Get-GSVEmulatorSaveLocations -Settings $settings)) { $locations.Add($l) }
     }
 
     # De-duplicate identical paths across games (e.g. shared Ubisoft folder).
@@ -366,6 +381,7 @@ function Show-Doctor {
     Write-Kv 'Steam roots' ((@(Get-GSVSteamRoots)) -join '; ')
     Write-Kv 'Steam libraries' (@(Get-GSVSteamLibraries).Count)
     Write-Kv 'Installed games found' (@(Get-GSVAllGames -Settings $settings -NoLocations).Count)
+    Write-Kv 'Console emulator saves' (@(Get-GSVEmulatorSaveLocations -Settings $settings -NoSize).Count)
     Write-Kv 'Snapshots' (@(Get-GSVSnapshots -BackupRoot $vault).Count)
 
     $old = @(Get-GSVWindowsOldRoots)
@@ -480,6 +496,64 @@ function Show-DeepScan {
     }
 }
 
+function Invoke-Migrate {
+    Write-Title 'Migrate console emulator saves'
+
+    $defs = @(Get-GSVEmulatorDefinitions)
+    $known = @($defs | ForEach-Object { $_.Id })
+    if (-not $From -or -not $To) {
+        Write-Host '  Usage:  .\GameSaveVault.ps1 migrate -From eden -To ryujinx [-Title 0100…] [-DryRun]' -ForegroundColor Yellow
+        Write-Host '  Emulators:  eden, eglantine, ryujinx, yuzu, suyu (Switch), kyty (PS5), shadps4 (PS4)' -ForegroundColor DarkGray
+        return
+    }
+    if ($known -notcontains $From) { throw "Unknown source emulator: $From (use eden, eglantine, ryujinx, yuzu, suyu, kyty, shadps4)" }
+    if ($known -notcontains $To) { throw "Unknown destination emulator: $To (use eden, eglantine, ryujinx, yuzu, suyu, kyty, shadps4)" }
+    if ($From -ieq $To) { throw 'Source and destination are the same emulator.' }
+
+    $srcDef = @($defs | Where-Object { $_.Id -eq $From })[0]
+    $dstDef = @($defs | Where-Object { $_.Id -eq $To })[0]
+    if ($srcDef.Console -ne $dstDef.Console) {
+        throw "Cannot migrate between different consoles: $($srcDef.Console) -> $($dstDef.Console)"
+    }
+
+    $index = @(Get-GSVEmulatorSaveIndex -EmulatorIds @($From) -IncludePortable)
+    $entries = @($index | Where-Object { $_.EmulatorId -eq $From })
+
+    if ($Title.Count -gt 0) {
+        $selected = New-Object System.Collections.Generic.List[object]
+        foreach ($e in $entries) {
+            foreach ($t in $Title) {
+                if ($e.TitleId -ieq $t) { $selected.Add($e); break }
+            }
+        }
+        $entries = $selected.ToArray()
+    }
+
+    if ($entries.Count -eq 0) {
+        Write-Host "  No saves found for $($srcDef.Name)." -ForegroundColor Yellow
+        return
+    }
+
+    foreach ($e in $entries) { Write-Host ("    {0}  profile {1}  <-  {2}" -f $e.TitleId, $e.ProfileId, $e.Path) -ForegroundColor DarkGray }
+    Write-Host ''
+    Write-Kv 'From' ("{0}" -f $srcDef.Name) 'Yellow'
+    Write-Kv 'To' ("{0}" -f $dstDef.Name) 'Yellow'
+    Write-Kv 'Saves to copy' $entries.Count
+    if ($isDryRun) { Write-Host '  DRY RUN - nothing will be copied.' -ForegroundColor Yellow }
+
+    $result = Copy-GSVEmulatorSaves -Entries $entries -DestinationEmulatorId $To -BackupRoot $vault -DryRun:$isDryRun
+
+    Write-Host ''
+    Write-Kv 'Copied' $result.Migrated 'Green'
+    Write-Kv 'Skipped' $result.Skipped
+    Write-Kv 'Failed' $result.Failed
+    foreach ($m in @($result.Messages)) { Write-Host "  - $m" -ForegroundColor DarkYellow }
+    if (-not $isDryRun -and $result.Migrated -gt 0) {
+        Write-Host '  Any save that was overwritten is in ' -NoNewline -ForegroundColor DarkGray
+        Write-Host (Join-Path $vault 'rollback') -ForegroundColor DarkGray
+    }
+}
+
 function Show-Help {
     Write-Host @'
 GameSaveVault - save/restore PC game saves across Windows reinstalls
@@ -491,6 +565,8 @@ COMMANDS
   scan                 List installed games and the save folders found (default)
   deep-scan            Search a whole drive for every save folder (CPY / GSE /
                        Goldberg / scene "remote" / UWP / Steam userdata / LocalLow)
+  migrate              Copy console-emulator saves between emulators
+                       (-From eden -To ryujinx, -From kyty, -Title ..., -DryRun)
   backup               Snapshot saves into the vault
   restore              Copy saves from the newest (or chosen) snapshot back
   from-old             Recover saves from C:\Windows.old after a reinstall
@@ -518,11 +594,15 @@ COMMON OPTIONS
   -MaxResults <n>      (deep-scan) stop after this many save folders, default 500
   -NoSize              (deep-scan) skip file counting / sizing (much faster)
   -Backup              (deep-scan) snapshot everything the scan found
+  -From / -To <emu>    (migrate) e.g. eden, ryujinx, eglantine, kyty, shadps4
+  -Title <id>          (migrate) only this title id (e.g. 0100… or PPSA…)
 
 EXAMPLES
   .\GameSaveVault.ps1 deep-scan
   .\GameSaveVault.ps1 deep-scan -AllDrives -MaxDepth 12
   .\GameSaveVault.ps1 deep-scan -Drive C: -Backup
+  .\GameSaveVault.ps1 migrate -From eden -To ryujinx
+  .\GameSaveVault.ps1 migrate -From eden -To ryujinx -Title 0100… -DryRun
   .\GameSaveVault.ps1 backup -All
   .\GameSaveVault.ps1 backup -Game Skyrim,Palworld
   .\GameSaveVault.ps1 restore -Snapshot latest -DryRun
@@ -548,6 +628,7 @@ try {
         'deepscan'  { Show-DeepScan }
         'deep'      { Show-DeepScan }
         'search'    { Show-DeepScan }
+        'migrate'   { Invoke-Migrate }
         'snapshots' { Show-Snapshots }
         'stats'     { Show-Stats }
         'add'       { Invoke-Add }
