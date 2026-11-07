@@ -579,12 +579,33 @@ function Show-MigrateDialog {
     $cbTo.Size = New-Object System.Drawing.Size(280, 24)
 
     foreach ($def in $defs) {
-        $label = "{0} ({1})" -f $def.Name, $def.Console
-        [void]$cbFrom.Items.Add($label)
-        [void]$cbTo.Items.Add($label)
+        [void]$cbFrom.Items.Add(("{0} ({1})" -f $def.Name, $def.Console))
     }
-    $cbFrom.SelectedIndex = 0
-    $cbTo.SelectedIndex = 1
+
+    $script:MigrateToDefs = @()
+    $populateTo = {
+        $cbTo.Items.Clear()
+        $script:MigrateToDefs = @()
+        if ($cbFrom.SelectedIndex -lt 0) { return }
+        $srcDef = $defs[$cbFrom.SelectedIndex]
+        $srcFamily = Get-GSVEmulatorFamily -Definition $srcDef
+        $same = New-Object System.Collections.Generic.List[object]
+        foreach ($d in $defs) {
+            if ($d.Id -eq $srcDef.Id) { continue }
+            if ((Get-GSVEmulatorFamily -Definition $d) -ne $srcFamily) { continue }
+            $same.Add($d)
+            [void]$cbTo.Items.Add(("{0} ({1})" -f $d.Name, $d.Console))
+        }
+        $script:MigrateToDefs = $same.ToArray()
+        if ($cbTo.Items.Count -gt 0) { $cbTo.SelectedIndex = 0 }
+        if ($btnGo) { $btnGo.Enabled = ($cbTo.Items.Count -gt 0) }
+    }
+
+    $cbFrom.Add_SelectedIndexChanged({
+        & $populateTo
+        $lv.Items.Clear()
+        $script:MigrateEntries = @()
+    })
 
     $lv = New-Object System.Windows.Forms.ListView
     $lv.Dock = 'Fill'
@@ -605,6 +626,10 @@ function Show-MigrateDialog {
     $btnRefresh = New-TopButton 'Refresh list' 100 'Re-scan the source emulator for saves'
     $btnGo = New-TopButton 'Migrate checked' 130 'Copy the checked saves into the other emulator'
     $btnClose = New-TopButton 'Close' 80
+
+    # Pick a source, then offer only emulators of the same console as targets.
+    if ($cbFrom.Items.Count -gt 0) { $cbFrom.SelectedIndex = 0 }
+    & $populateTo
 
     $script:MigrateEntries = @()
 
@@ -627,7 +652,11 @@ function Show-MigrateDialog {
 
     $btnGo.Add_Click({
         $srcDef = $defs[$cbFrom.SelectedIndex]
-        $dstDef = $defs[$cbTo.SelectedIndex]
+        if ($cbTo.SelectedIndex -lt 0 -or $script:MigrateToDefs.Count -eq 0) {
+            Show-Warn ("No other {0} emulator is installed to migrate to." -f $srcDef.Console)
+            return
+        }
+        $dstDef = $script:MigrateToDefs[$cbTo.SelectedIndex]
         if ($srcDef.Id -eq $dstDef.Id) { Show-Warn 'Source and destination are the same emulator.'; return }
 
         $chosen = New-Object System.Collections.Generic.List[object]
@@ -1107,7 +1136,7 @@ $btnRestoreFile = New-TopButton 'Restore file...' 110 'Restore saves on another 
 $btnExportDb = New-TopButton 'Export DB...' 110 'Write one portable .gsvdb file containing saves + the scan database'
 $btnOld      = New-TopButton 'Windows.old...' 120 'Recover saves from C:\Windows.old'
 $btnDeep     = New-TopButton 'Deep scan...' 110 'Search a whole drive for CPY / GSE / scene / Steam / UWP saves'
-$btnMigrate  = New-TopButton 'Migrate...' 90 'Copy console-emulator saves between emulators (Eden / Ryujinx / Eglantine / Kyty)'
+$btnMigrate  = New-TopButton 'Migrate...' 90 'Copy console-emulator saves between emulators of the same console'
 $btnAdd      = New-TopButton 'Add game...' 100 'Register a custom save folder'
 $btnRules    = New-TopButton 'Save rules...' 110 'Manage the portable save-location database (config\save-rules.json)'
 $btnVault    = New-TopButton 'Open vault' 100 'Open the backup folder'

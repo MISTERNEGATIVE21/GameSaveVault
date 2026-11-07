@@ -363,14 +363,23 @@ Big console emulators keep saves **outside** the game folder, keyed by a *title 
 | Emulator family | Console | Save roots (relative to the emulator data folder) |
 |---|---|---|
 | Switch emulators | Nintendo Switch | `nand\user\save\<profile>\<titleID>` / `nand\system\save\<profile>\<titleID>` or `bis\user\save\<profile>\<titleID>` / `bis\system\save\<profile>\<titleID>` (title ID = 16 hex digits) |
+| 3DS emulators | Nintendo 3DS | `sdmc\Nintendo 3DS\<id0>\<id1>\title\<title-high>\<title-low>` (title ID = 16 hex digits, split into two 8-hex folder names) |
+| PSP emulators | PlayStation Portable | `PSP\SAVEDATA\<gameID>` or `memstick\PSP\SAVEDATA\<gameID>` |
+| PS3 emulators | PlayStation 3 | `dev_hdd0\home\<user>\savedata\<titleID>` |
+| PS Vita emulators | PlayStation Vita | `ux0\user\<user>\savedata\<titleID>` |
+| Xbox 360 emulators | Xbox 360 | `content\<profile>\<titleID>` (title ID = 8 hex digits) |
+| Wii U emulators | Wii U | `mlc01\usr\save\<titleID>` |
+| Wii emulators | Wii | `Wii\titles\<gameID>` |
 | PlayStation 5 emulators | PlayStation 5 | `_SaveData\PPSA…` **next to the emulator exe** (portable — the install folder can be called anything) |
 | PlayStation 4 emulators | PlayStation 4 | `user\<profile>\savedata\<CUSA…>` |
 
-Data folders are probed in `%APPDATA%\<emulator>` and `%LOCALAPPDATA%\<emulator>`, plus a shallow walk of every drive for portable installs (any folder that looks like an emulator data folder, or any `_SaveData` folder — Recycle Bins, caches and system folders are skipped).
+Emulators that use one shared memory card, battery save or save-state folder (PS1/PS2, DS, GBA and multi-system retro emulators) are backed up as shared save folders instead of per-title folders. They are listed under the emulator's name and restored like any other save.
+
+Data folders are probed in `%APPDATA%\<emulator>`, `%LOCALAPPDATA%\<emulator>` and `%DOCUMENTS%\<emulator>` when that is where the emulator keeps them, plus a shallow walk of every drive for portable installs (a folder that contains `dev_hdd0\home`, `ux0\user`, `mlc01\usr`, `PSP\SAVEDATA`, `memstick\PSP\SAVEDATA`, `Wii\titles`, `content\0000000000000000`, `user\nand\user\save`, `user\sdmc\Nintendo 3DS`, `portable\bis\user\save`, a `User` folder or a `_SaveData` folder — Recycle Bins, caches and system folders are skipped).
 
 #### Migrating saves between emulators
 
-Switch saves are stored the way the game wrote them, so moving between Switch emulators is a folder copy matched by title ID. The profile ID is remapped to the destination's own, and any save that would be overwritten is moved to `vault\rollback\<timestamp>\` first.
+Saves are stored the way the game wrote them, so moving between emulators for the **same console** is a folder copy matched by title ID. The profile ID is remapped to the destination's own, and any save that would be overwritten is moved to `vault\rollback\<timestamp>\` first.
 
 ```powershell
 # see what would happen first

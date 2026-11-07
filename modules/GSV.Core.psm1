@@ -2250,49 +2250,182 @@ function Get-GSVGlobalSaveLocations {
 
 function Get-GSVEmulatorDefinitions {
     return @(
+        # --- Nintendo Switch (nand / bis save trees) -------------------------
         [pscustomobject]@{
             Id = 'eden'; Name = 'Eden'; Console = 'Nintendo Switch'
             DataDirPatterns = @('%APPDATA%\eden', '%LOCALAPPDATA%\eden')
             SaveRoots = @('nand\user\save', 'nand\system\save')
             TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('eden')
         }
         [pscustomobject]@{
             Id = 'eglantine'; Name = 'Eglantine'; Console = 'Nintendo Switch'
             DataDirPatterns = @('%APPDATA%\eglantine', '%LOCALAPPDATA%\eglantine', '%APPDATA%\Eglantine', '%LOCALAPPDATA%\Eglantine')
             SaveRoots = @('nand\user\save', 'nand\system\save')
             TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('eglantine')
         }
         [pscustomobject]@{
             Id = 'ryujinx'; Name = 'Ryujinx'; Console = 'Nintendo Switch'
             DataDirPatterns = @('%APPDATA%\ryujinx', '%LOCALAPPDATA%\ryujinx', '%APPDATA%\Ryujinx', '%LOCALAPPDATA%\Ryujinx')
             SaveRoots = @('bis\user\save', 'bis\system\save')
             TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('ryujinx')
         }
         [pscustomobject]@{
             Id = 'yuzu'; Name = 'Yuzu'; Console = 'Nintendo Switch'
             DataDirPatterns = @('%APPDATA%\yuzu', '%LOCALAPPDATA%\yuzu')
             SaveRoots = @('nand\user\save', 'nand\system\save')
             TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('yuzu')
         }
         [pscustomobject]@{
             Id = 'suyu'; Name = 'Suyu'; Console = 'Nintendo Switch'
             DataDirPatterns = @('%APPDATA%\suyu', '%LOCALAPPDATA%\suyu')
             SaveRoots = @('nand\user\save', 'nand\system\save')
             TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('suyu')
         }
         [pscustomobject]@{
-            Id = 'kyty'; Name = 'Kyty / KytyPS5'; Console = 'PlayStation 5'
+            Id = 'sudachi'; Name = 'Sudachi'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\sudachi', '%LOCALAPPDATA%\sudachi')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('sudachi')
+        }
+        [pscustomobject]@{
+            Id = 'nuzu'; Name = 'Nuzu'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\nuzu', '%LOCALAPPDATA%\nuzu')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('nuzu')
+        }
+        [pscustomobject]@{
+            Id = 'citron'; Name = 'Citron'; Console = 'Nintendo Switch'
+            DataDirPatterns = @('%APPDATA%\citron', '%LOCALAPPDATA%\citron')
+            SaveRoots = @('nand\user\save', 'nand\system\save')
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = 'Switch title'
+            PortableNames = @('citron')
+        }
+
+        # --- Nintendo 3DS (sdmc\Nintendo 3DS\id0\id1\title\high\low) --------
+        [pscustomobject]@{
+            Id = 'azahar'; Name = 'Azahar'; Console = 'Nintendo 3DS'
+            DataDirPatterns = @('%APPDATA%\Azahar', '%LOCALAPPDATA%\Azahar')
+            SaveRoots = @('sdmc\Nintendo 3DS')
+            Layout = '3ds'
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = '3DS title'
+        }
+        [pscustomobject]@{
+            Id = 'citra'; Name = 'Citra'; Console = 'Nintendo 3DS'
+            DataDirPatterns = @('%APPDATA%\Citra', '%LOCALAPPDATA%\Citra')
+            SaveRoots = @('sdmc\Nintendo 3DS')
+            Layout = '3ds'
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = '3DS title'
+        }
+        [pscustomobject]@{
+            Id = 'lime3ds'; Name = 'Lime3DS'; Console = 'Nintendo 3DS'
+            DataDirPatterns = @('%APPDATA%\Lime3DS', '%LOCALAPPDATA%\Lime3DS')
+            SaveRoots = @('sdmc\Nintendo 3DS')
+            Layout = '3ds'
+            TitlePattern = '^[0-9a-fA-F]{16}$'; TitleNoun = '3DS title'
+        }
+
+        # --- PlayStation Portable (PSP\SAVEDATA\<game-id>) -------------------
+        [pscustomobject]@{
+            Id = 'ppsspp'; Name = 'PPSSPP'; Console = 'PSP'
+            DataDirPatterns = @('%APPDATA%\PPSSPP', '%LOCALAPPDATA%\PPSSPP', '%DOCUMENTS%\PPSSPP')
+            SaveRoots = @('PSP\SAVEDATA', 'memstick\PSP\SAVEDATA')
+            TitlePattern = '^[A-Za-z]{4}\d{5}$'; TitleNoun = 'PSP title'
+            PortableNames = @('ppsspp')
+        }
+
+        # --- PlayStation 3 (dev_hdd0\home\<user>\savedata\<titleID>) ---------
+        [pscustomobject]@{
+            Id = 'rpcs3'; Name = 'RPCS3'; Console = 'PS3'
+            DataDirPatterns = @('%APPDATA%\rpcs3', '%LOCALAPPDATA%\rpcs3')
+            SaveRoots = @('dev_hdd0\home\*\savedata')
+            TitlePattern = '^[A-Za-z]{4}\d{5}$'; TitleNoun = 'PS3 title'
+            PortableNames = @('rpcs3')
+        }
+
+        # --- PlayStation Vita (ux0\user\<user>\savedata\<titleID>) -----------
+        [pscustomobject]@{
+            Id = 'vita3k'; Name = 'Vita3K'; Console = 'PS Vita'
+            DataDirPatterns = @('%APPDATA%\Vita3K', '%LOCALAPPDATA%\Vita3K')
+            SaveRoots = @('ux0\user\*\savedata')
+            TitlePattern = '^[A-Za-z]{4}\d{5}$'; TitleNoun = 'PS Vita title'
+            PortableNames = @('vita3k')
+        }
+
+        # --- Xbox 360 (content\<profile>\<8-hex titleID>) --------------------
+        [pscustomobject]@{
+            Id = 'xenia'; Name = 'Xenia'; Console = 'Xbox 360'
+            DataDirPatterns = @('%APPDATA%\Xenia', '%LOCALAPPDATA%\Xenia', '%DOCUMENTS%\Xenia')
+            SaveRoots = @('content')
+            TitlePattern = '^[0-9A-Fa-f]{8}$'; TitleNoun = 'Xbox 360 title'
+            PortableNames = @('xenia')
+        }
+
+        # --- Wii U (mlc01\usr\save\<titleID>) --------------------------------
+        [pscustomobject]@{
+            Id = 'cemu'; Name = 'Cemu'; Console = 'Wii U'
+            DataDirPatterns = @('%APPDATA%\Cemu', '%LOCALAPPDATA%\Cemu', '%DOCUMENTS%\Cemu')
+            SaveRoots = @('mlc01\usr\save')
+            TitlePattern = '^[0-9A-Fa-f]{16}$'; TitleNoun = 'Wii U title'
+            PortableNames = @('cemu')
+        }
+
+        # --- Wii (Wii\titles\<game-id>) --------------------------------------
+        [pscustomobject]@{
+            Id = 'dolphin'; Name = 'Dolphin'; Console = 'Wii'
+            DataDirPatterns = @('%APPDATA%\Dolphin Emulator', '%LOCALAPPDATA%\Dolphin Emulator', '%DOCUMENTS%\Dolphin Emulator')
+            SaveRoots = @('Wii\titles')
+            TitlePattern = '^[A-Za-z0-9]{6}$'; TitleNoun = 'Wii title'
+            PortableNames = @('dolphin emulator', 'dolphin')
+        }
+
+        # --- PlayStation 5 / 4 -----------------------------------------------
+        [pscustomobject]@{
+            Id = 'kyty'; Name = 'Kyty / KytyPS5'; Console = 'PlayStation 5'; Family = 'PlayStation'
             DataDirPatterns = @('%APPDATA%\Kyty', '%APPDATA%\kyty', '%APPDATA%\KytyPS5', '%APPDATA%\kytyps5',
                                 '%LOCALAPPDATA%\Kyty', '%LOCALAPPDATA%\kyty', '%LOCALAPPDATA%\KytyPS5', '%LOCALAPPDATA%\kytyps5')
             SaveRoots = @('_SaveData')
             TitlePattern = '^(PPSA|CUSA)\d{4,6}$'; TitleNoun = 'PS5 title'
+            PortableNames = @('kyty', 'kytyps5')
         }
         [pscustomobject]@{
-            Id = 'shadps4'; Name = 'shadPS4'; Console = 'PlayStation 4'
+            Id = 'shadps4'; Name = 'shadPS4'; Console = 'PlayStation 4'; Family = 'PlayStation'
             DataDirPatterns = @('%APPDATA%\shadPS4', '%LOCALAPPDATA%\shadPS4')
             SaveRoots = @('user\*\savedata')
             TitlePattern = '^(PPSA|CUSA)\d{4,6}$'; TitleNoun = 'PS4 title'
+            PortableNames = @('shadps4')
         }
+    )
+}
+
+# Emulators whose saves are interchangeable. Most are one console; PS4 and PS5
+# share the same save-data format for cross-generation titles.
+function Get-GSVEmulatorFamily {
+    param([Parameter(Mandatory)]$Definition)
+    $prop = $Definition.PSObject.Properties['Family']
+    if ($prop -and $prop.Value) { return [string]$prop.Value }
+    return [string]$Definition.Console
+}
+
+# Emulators that keep *shared* save files (memory cards, battery saves, save
+# states) instead of one folder per title. They are still backed up as normal
+# save locations, but cannot be migrated title-by-title.
+function Get-GSVEmulatorSharedRoots {
+    return @(
+        [pscustomobject]@{ Id = 'pcsx2'; Name = 'PCSX2'; Patterns = @('%DOCUMENTS%\PCSX2\memcards', '%APPDATA%\PCSX2\memcards'); Note = 'PCSX2 memory cards (all games)' }
+        [pscustomobject]@{ Id = 'duckstation'; Name = 'DuckStation'; Patterns = @('%APPDATA%\DuckStation\memcards', '%DOCUMENTS%\DuckStation\memcards'); Note = 'DuckStation memory cards (all games)' }
+        [pscustomobject]@{ Id = 'retroarch'; Name = 'RetroArch'; Patterns = @('%APPDATA%\RetroArch\saves', '%APPDATA%\RetroArch\states'); Note = 'RetroArch save files / states (all games)' }
+        [pscustomobject]@{ Id = 'melonds'; Name = 'melonDS'; Patterns = @('%APPDATA%\melonDS\saves'); Note = 'melonDS save files (all games)' }
+        [pscustomobject]@{ Id = 'desmume'; Name = 'DeSmuME'; Patterns = @('%APPDATA%\DeSmuME\Battery', '%DOCUMENTS%\DeSmuME\Battery'); Note = 'DeSmuME battery saves (all games)' }
+        [pscustomobject]@{ Id = 'mgba'; Name = 'mGBA'; Patterns = @('%APPDATA%\mGBA\saves'); Note = 'mGBA save files (all games)' }
+        [pscustomobject]@{ Id = 'bizhawk'; Name = 'BizHawk'; Patterns = @('%APPDATA%\BizHawk\SaveRAM'); Note = 'BizHawk SaveRAM (all games)' }
+        [pscustomobject]@{ Id = 'dolphin-gc'; Name = 'Dolphin'; Patterns = @('%APPDATA%\Dolphin Emulator\GC', '%DOCUMENTS%\Dolphin Emulator\GC'); Note = 'Dolphin GameCube memory cards (all games)' }
     )
 }
 
@@ -2328,11 +2461,38 @@ function Get-GSVEmulatorDirs {
     # 2. portable installs: emulator folder anywhere next to an .exe, found by a
     #    shallow walk of every drive root and the configured game folders.
     if ($IncludePortable) {
-        $portableNames = @{
-            'eden' = 'eden'; 'eglantine' = 'eglantine'; 'ryujinx' = 'ryujinx'
-            'yuzu' = 'yuzu'; 'suyu' = 'suyu'; 'kyty' = 'kyty'; 'kytyps5' = 'kyty'
-            'shadps4' = 'shadps4'
+        $portableNames = @{}
+        foreach ($d in $defs) {
+            foreach ($n in @($d.PortableNames)) {
+                if ($n) { $portableNames[$n.ToLowerInvariant()] = $d.Id }
+            }
         }
+
+        # Portable builds often live in a renamed folder, so also recognise the
+        # data folder that sits next to the exe.
+        $portableLayouts = @(
+            @{ Id = 'rpcs3';    Probe = 'dev_hdd0\home';              Suffix = '' }
+            @{ Id = 'vita3k';   Probe = 'ux0\user';                   Suffix = '' }
+            @{ Id = 'cemu';     Probe = 'mlc01\usr';                  Suffix = '' }
+            @{ Id = 'ppsspp';   Probe = 'PSP\SAVEDATA';               Suffix = '' }
+            @{ Id = 'ppsspp';   Probe = 'memstick\PSP\SAVEDATA';      Suffix = '' }
+            @{ Id = 'dolphin';  Probe = 'User\Wii\titles';            Suffix = 'User' }
+            @{ Id = 'xenia';    Probe = 'content\0000000000000000';   Suffix = '' }
+            @{ Id = 'ryujinx';  Probe = 'portable\bis\user\save';     Suffix = 'portable' }
+            # These probes are shared by several forks, so only claim the folder
+            # when that fork's executable is really there (avoids one portable
+            # install being reported once per emulator).
+            @{ Id = 'yuzu';     Probe = 'user\nand\user\save';        Suffix = 'user'; Exe = @('yuzu.exe') }
+            @{ Id = 'suyu';     Probe = 'user\nand\user\save';        Suffix = 'user'; Exe = @('suyu.exe') }
+            @{ Id = 'sudachi';  Probe = 'user\nand\user\save';        Suffix = 'user'; Exe = @('sudachi.exe') }
+            @{ Id = 'nuzu';     Probe = 'user\nand\user\save';        Suffix = 'user'; Exe = @('nuzu.exe') }
+            @{ Id = 'citron';   Probe = 'user\nand\user\save';        Suffix = 'user'; Exe = @('citron.exe') }
+            @{ Id = 'eden';     Probe = 'user\nand\user\save';        Suffix = 'user'; Exe = @('eden.exe') }
+            @{ Id = 'eglantine'; Probe = 'user\nand\user\save';       Suffix = 'user'; Exe = @('eglantine.exe') }
+            @{ Id = 'azahar';   Probe = 'user\sdmc\Nintendo 3DS';     Suffix = 'user'; Exe = @('azahar.exe') }
+            @{ Id = 'citra';    Probe = 'user\sdmc\Nintendo 3DS';     Suffix = 'user'; Exe = @('citra-qt.exe', 'citra.exe') }
+            @{ Id = 'lime3ds';  Probe = 'user\sdmc\Nintendo 3DS';     Suffix = 'user'; Exe = @('lime3ds.exe') }
+        )
 
         $roots = New-Object System.Collections.Generic.List[string]
         try {
@@ -2344,7 +2504,14 @@ function Get-GSVEmulatorDirs {
 
         $visited = 0
         $queue = New-Object System.Collections.Queue
-        foreach ($r in $roots) { if ($r) { $queue.Enqueue([pscustomobject]@{ Path = $r.TrimEnd('\'); Depth = 0 }) } }
+        foreach ($r in $roots) {
+            if (-not $r) { continue }
+            $p = ([string]$r).TrimEnd('\')
+            # Keep the separator on a drive root, otherwise "C:" means "current
+            # folder on C:" and child paths come out as "C:ProgramData\...".
+            if ($p -match '^[A-Za-z]:$') { $p += '\' }
+            $queue.Enqueue([pscustomobject]@{ Path = $p; Depth = 0 })
+        }
 
         while ($queue.Count -gt 0) {
             $node = $queue.Dequeue()
@@ -2382,6 +2549,25 @@ function Get-GSVEmulatorDirs {
                     }
                 }
             }
+            foreach ($pl in $portableLayouts) {
+                $probe = Join-Path $path $pl.Probe
+                if (-not (Test-Path -LiteralPath $probe)) { continue }
+                if ($pl.Exe) {
+                    $hasExe = $false
+                    foreach ($exeName in @($pl.Exe)) {
+                        if (Test-Path -LiteralPath (Join-Path $path $exeName)) { $hasExe = $true; break }
+                    }
+                    if (-not $hasExe) { continue }
+                }
+                $def = @($defs | Where-Object { $_.Id -eq $pl.Id }) | Select-Object -First 1
+                if (-not $def) { continue }
+                $dataDir = if ($pl.Suffix) { Join-Path $path $pl.Suffix } else { $path }
+                $key = ("{0}|{1}" -f $def.Id, $dataDir.ToLowerInvariant())
+                if (-not $seen.ContainsKey($key)) {
+                    $seen[$key] = $true
+                    $found.Add([pscustomobject]@{ Emulator = $def; DataDir = $dataDir; Origin = 'portable' })
+                }
+            }
 
             if ($depth -ge 4) { continue }
             try {
@@ -2407,6 +2593,35 @@ function Get-GSVEmulatorSaveIndex {
 
     foreach ($hit in @(Get-GSVEmulatorDirs -EmulatorIds $EmulatorIds -TokenTable $TokenTable -IncludePortable:$IncludePortable)) {
         $def = $hit.Emulator
+
+        # Nintendo 3DS: sdmc\Nintendo 3DS\<id0>\<id1>\title\<title-high>\<title-low>
+        if ([string]$def.Layout -eq '3ds') {
+            foreach ($relRoot in @($def.SaveRoots)) {
+                $saveRoot = $relRoot -replace '/', '\'
+                $rootDir = Join-Path $hit.DataDir $saveRoot
+                if (-not (Test-Path -LiteralPath $rootDir)) { continue }
+                foreach ($id0 in @(Get-ChildItem -LiteralPath $rootDir -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($id1 in @(Get-ChildItem -LiteralPath $id0.FullName -Directory -ErrorAction SilentlyContinue)) {
+                        $titleDir = Join-Path $id1.FullName 'title'
+                        if (-not (Test-Path -LiteralPath $titleDir)) { continue }
+                        foreach ($high in @(Get-ChildItem -LiteralPath $titleDir -Directory -ErrorAction SilentlyContinue |
+                                Where-Object { $_.Name -match '^[0-9a-fA-F]{8}$' })) {
+                            foreach ($low in @(Get-ChildItem -LiteralPath $high.FullName -Directory -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.Name -match '^[0-9a-fA-F]{8}$' })) {
+                                $titleId = $high.Name + $low.Name
+                                if ($titleId -notmatch $def.TitlePattern) { continue }
+                                $rows.Add([pscustomobject]@{
+                                    EmulatorId = $def.Id; EmulatorName = $def.Name; Console = $def.Console
+                                    TitleId = $titleId; ProfileId = ($id0.Name + '\' + $id1.Name); Path = $low.FullName
+                                    DataDir = $hit.DataDir; SaveRoot = $titleDir; Origin = $hit.Origin
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            continue
+        }
 
         foreach ($relRoot in @($def.SaveRoots)) {
             $saveRoot = $relRoot -replace '/', '\'
@@ -2460,9 +2675,14 @@ function Add-GSVEmulatorSaveEntries {
     )
 
     # PS5/PS4 style: SaveRoot\<PPSA…\ or <CUSA…\
+    # Switch saves are always <profile>\<title>, so never treat a profile folder
+    # as a title even when it is currently empty.
     $addedFlat = $false
-    $flatTitles = @(Get-ChildItem -LiteralPath $SaveRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $Def.TitlePattern })
+    $flatTitles = @()
+    if ($Def.Console -ne 'Nintendo Switch') {
+        $flatTitles = @(Get-ChildItem -LiteralPath $SaveRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $Def.TitlePattern })
+    }
     foreach ($title in $flatTitles) {
         # A Switch profile folder (SaveRoot\<profile>\<title>) also matches the
         # 16-hex pattern. If a child holds title folders itself, it is a
@@ -2526,6 +2746,47 @@ function Get-GSVEmulatorSaveLocations {
             FileCount      = if ($size) { $size.Files } else { $null }
             Bytes          = if ($size) { $size.Bytes } else { $null }
         })
+    }
+
+    # Emulators that use shared memory cards / battery saves rather than one
+    # folder per title. They are backed up as ordinary save locations.
+    $seenPaths = @{}
+    foreach ($l in $locations.ToArray()) {
+        if ($l.ResolvedPath) { $seenPaths[([string]$l.ResolvedPath).TrimEnd('\').ToLowerInvariant()] = $true }
+    }
+    foreach ($shared in @(Get-GSVEmulatorSharedRoots)) {
+        foreach ($pattern in @($shared.Patterns)) {
+            foreach ($path in @(Resolve-GSVPathPattern -Pattern $pattern -TokenTable $TokenTable)) {
+                if (-not $path) { continue }
+                $key = $path.TrimEnd('\').ToLowerInvariant()
+                if ($seenPaths.ContainsKey($key)) { continue }
+                $seenPaths[$key] = $true
+
+                $anchor = Get-GSVPathAnchor -ResolvedPath $path -TokenTable $TokenTable
+                $isFile = $false
+                try { $isFile = (Test-Path -LiteralPath $path -PathType Leaf) } catch { }
+                $size = $null
+                if (-not $NoSize) { $size = Measure-GSVPathSize -Path $path }
+
+                $locations.Add([pscustomobject]@{
+                    GameId         = 'emu-shared-' + $shared.Id
+                    GameName       = ('{0} saves (all games)' -f $shared.Name)
+                    Source         = $shared.Name
+                    AppId          = ''
+                    InstallDirHint = ''
+                    Token          = $anchor.Token
+                    RelativePath   = $anchor.Relative
+                    AbsolutePath   = $anchor.Absolute
+                    ResolvedPath   = $path
+                    Kind           = if ($isFile) { 'File' } else { 'Directory' }
+                    Note           = $shared.Note
+                    Origin         = 'emulator'
+                    Exists         = $true
+                    FileCount      = if ($size) { $size.Files } else { $null }
+                    Bytes          = if ($size) { $size.Bytes } else { $null }
+                })
+            }
+        }
     }
 
     return $locations.ToArray()

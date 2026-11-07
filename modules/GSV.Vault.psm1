@@ -792,6 +792,22 @@ function Copy-GSVEmulatorSaves {
 
     $def = @((Get-GSVEmulatorDefinitions) | Where-Object { $_.Id -eq $DestinationEmulatorId }) | Select-Object -First 1
     if (-not $def) { throw "Unknown destination emulator: $DestinationEmulatorId" }
+    $layout = [string]$def.Layout
+
+    # Saves are only portable between emulators of the same console family
+    # (PS4 and PS5 share the save-data format; other consoles do not).
+    $destFamily = Get-GSVEmulatorFamily -Definition $def
+    $allDefs = @(Get-GSVEmulatorDefinitions)
+    foreach ($entry in @($Entries)) {
+        $srcDef = $null
+        if ($entry.EmulatorId) {
+            $srcDef = @($allDefs | Where-Object { $_.Id -eq $entry.EmulatorId }) | Select-Object -First 1
+        }
+        $srcFamily = if ($srcDef) { Get-GSVEmulatorFamily -Definition $srcDef } else { [string]$entry.Console }
+        if ($srcFamily -and $srcFamily -ne $destFamily) {
+            throw ("Cannot migrate {0} saves to a {1} emulator." -f $srcFamily, $destFamily)
+        }
+    }
 
     # Every save root the destination emulator currently has (so we can place a
     # save next to its existing data instead of guessing a new folder).
@@ -845,30 +861,68 @@ function Copy-GSVEmulatorSaves {
             continue
         }
 
-        # Pick the matching destination save root: prefer the same subsystem
-        # (user saves vs system saves), then the first one available.
-        $destRoot = $destRoots[0].SaveRoot
-        foreach ($candidate in $destRoots) {
-            $candLeaf = Split-Path -Leaf $candidate.SaveRoot
-            $srcLeaf = Split-Path -Leaf $entry.SaveRoot
-            if ($candLeaf -ieq $srcLeaf) { $destRoot = $candidate.SaveRoot; break }
-        }
-        foreach ($candidate in $destRoots) {
-            if ($candidate.SaveRoot -match '(?i)\\user\\save$' -and $entry.SaveRoot -match '(?i)\\user\\save$') { $destRoot = $candidate.SaveRoot; break }
-        }
+        if ($layout -eq '3ds') {
+            # Nintendo 3DS: <save root>\<id0>\<id1>\title\<high>\<low>
+            $base = $destRoots[0].SaveRoot
+            $id0 = ''; $id1 = ''
 
-        # Profile mapping: keep the source profile if the destination knows it,
-        # otherwise use the destination's own profile slot.
-        $profile = [string]$entry.ProfileId
-        if ($profile) {
-            $profileDir = Join-Path $destRoot $profile
-            if (-not (Test-Path -LiteralPath $profileDir)) {
-                $existing = @(Get-ChildItem -LiteralPath $destRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)
-                if ($existing.Count -gt 0) { $profile = $existing[0].Name }
+            # Prefer the same id0\id1 profile when the destination already has it.
+            if ([string]$entry.ProfileId -match '^([^\\]+)\\(.+)$') {
+                $cand = Join-Path (Join-Path $base $matches[1]) $matches[2]
+                if (Test-Path -LiteralPath $cand) { $id0 = $matches[1]; $id1 = $matches[2] }
             }
-        }
+            if (-not $id1) {
+                foreach ($d0 in @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($d1 in @(Get-ChildItem -LiteralPath $d0.FullName -Directory -ErrorAction SilentlyContinue)) {
+                        $id0 = $d0.Name; $id1 = $d1.Name; break
+                    }
+                    if ($id1) { break }
+                }
+            }
+            if (-not $id1 -and $entry.ProfileId -match '^([^\\]+)\\(.+)$') {
+                $id0 = $matches[1]; $id1 = $matches[2]
+            }
+            if (-not $id1) {
+                $messages.Add("no destination 3DS profile in $base - launch $($def.Name) once, then migrate again")
+                $skipped++
+                continue
+            }
 
-        $dest = if ($profile) { Join-Path (Join-Path $destRoot $profile) $entry.TitleId } else { Join-Path $destRoot $entry.TitleId }
+            $tid = [string]$entry.TitleId
+            if ($tid.Length -ne 16) {
+                $messages.Add("unsupported 3DS title id: $tid")
+                $skipped++
+                continue
+            }
+            $high = $tid.Substring(0, 8)
+            $low = $tid.Substring(8, 8)
+            $dest = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $base $id0) $id1) 'title') $high) $low
+        } else {
+            # Pick the matching destination save root: prefer the same subsystem
+            # (user saves vs system saves), then the first one available.
+            $destRoot = $destRoots[0].SaveRoot
+            foreach ($candidate in $destRoots) {
+                $candLeaf = Split-Path -Leaf $candidate.SaveRoot
+                $srcLeaf = Split-Path -Leaf $entry.SaveRoot
+                if ($candLeaf -ieq $srcLeaf) { $destRoot = $candidate.SaveRoot; break }
+            }
+            foreach ($candidate in $destRoots) {
+                if ($candidate.SaveRoot -match '(?i)\\user\\save$' -and $entry.SaveRoot -match '(?i)\\user\\save$') { $destRoot = $candidate.SaveRoot; break }
+            }
+
+            # Profile mapping: keep the source profile if the destination knows it,
+            # otherwise use the destination's own profile slot.
+            $profile = [string]$entry.ProfileId
+            if ($profile) {
+                $profileDir = Join-Path $destRoot $profile
+                if (-not (Test-Path -LiteralPath $profileDir)) {
+                    $existing = @(Get-ChildItem -LiteralPath $destRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)
+                    if ($existing.Count -gt 0) { $profile = $existing[0].Name }
+                }
+            }
+
+            $dest = if ($profile) { Join-Path (Join-Path $destRoot $profile) $entry.TitleId } else { Join-Path $destRoot $entry.TitleId }
+        }
 
         if ($DryRun) {
             Write-GSVLog -Level Info -Message ("[dry-run] migrate {0} -> {1}  [{2}]" -f $src, $dest, $entry.TitleId)

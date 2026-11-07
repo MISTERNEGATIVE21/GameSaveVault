@@ -196,7 +196,7 @@ function Show-Scan {
     $emulators = @(Get-GSVEmulatorSaveLocations -Settings $settings -NoSize)
     if ($emulators.Count -gt 0) {
         Write-Host ''
-        Write-Host ("  Console emulator saves (Switch / PS5 / PS4): {0} title save(s)" -f $emulators.Count) -ForegroundColor DarkYellow
+        Write-Host ("  Console emulator saves (Switch / 3DS / PSP / PS3 / Vita / Xbox 360 / Wii / PS5 / PS4): {0} save folder(s)" -f $emulators.Count) -ForegroundColor DarkYellow
         foreach ($l in $emulators) { Write-Host ("    DIR  {0}   ({1})" -f $l.ResolvedPath, $l.Note) -ForegroundColor DarkGray }
         Write-Host '  Copy saves between emulators:  .\GameSaveVault.ps1 migrate -From eden -To ryujinx' -ForegroundColor DarkGray
     }
@@ -920,18 +920,21 @@ function Invoke-Migrate {
 
     $defs = @(Get-GSVEmulatorDefinitions)
     $known = @($defs | ForEach-Object { $_.Id })
+    $emuList = ($defs | ForEach-Object { '{0} ({1})' -f $_.Id, $_.Console }) -join ', '
     if (-not $From -or -not $To) {
-        Write-Host '  Usage:  .\GameSaveVault.ps1 migrate -From eden -To ryujinx [-Title 0100…] [-DryRun]' -ForegroundColor Yellow
-        Write-Host '  Emulators:  eden, eglantine, ryujinx, yuzu, suyu (Switch), kyty (PS5), shadps4 (PS4)' -ForegroundColor DarkGray
+        Write-Host '  Usage:  .\GameSaveVault.ps1 migrate -From <source> -To <target> [-Title <id>] [-DryRun]' -ForegroundColor Yellow
+        Write-Host ("  Emulators:  {0}" -f $emuList) -ForegroundColor DarkGray
         return
     }
-    if ($known -notcontains $From) { throw "Unknown source emulator: $From (use eden, eglantine, ryujinx, yuzu, suyu, kyty, shadps4)" }
-    if ($known -notcontains $To) { throw "Unknown destination emulator: $To (use eden, eglantine, ryujinx, yuzu, suyu, kyty, shadps4)" }
+    if ($known -notcontains $From) { throw "Unknown source emulator: $From (use: $($known -join ', '))" }
+    if ($known -notcontains $To) { throw "Unknown destination emulator: $To (use: $($known -join ', '))" }
     if ($From -ieq $To) { throw 'Source and destination are the same emulator.' }
 
     $srcDef = @($defs | Where-Object { $_.Id -eq $From })[0]
     $dstDef = @($defs | Where-Object { $_.Id -eq $To })[0]
-    if ($srcDef.Console -ne $dstDef.Console) {
+    $srcFamily = Get-GSVEmulatorFamily -Definition $srcDef
+    $dstFamily = Get-GSVEmulatorFamily -Definition $dstDef
+    if ($srcFamily -ne $dstFamily) {
         throw "Cannot migrate between different consoles: $($srcDef.Console) -> $($dstDef.Console)"
     }
 
@@ -1028,7 +1031,7 @@ COMMON OPTIONS
   -MaxResults <n>      (deep-scan) stop after this many save folders, default 500
   -NoSize              (deep-scan) skip file counting / sizing (much faster)
   -Backup              (deep-scan) snapshot everything the scan found
-  -From / -To <emu>    (migrate) e.g. eden, ryujinx, eglantine, kyty, shadps4
+  -From / -To <emu>    (migrate) emulator ids, e.g. eden, ryujinx, azahar, citra, ppsspp
   -Title <id>          (migrate) only this title id (e.g. 0100… or PPSA…)
   -Directory <path>    (scan-folders/deep-scan) folders to search, e.g. D:\Games
   -RestoreFormat       (restore/from-old/restore-db) profile (default) | verbatim | folder
