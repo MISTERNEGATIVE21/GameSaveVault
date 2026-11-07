@@ -102,6 +102,143 @@ function Select-Folder {
     return $null
 }
 
+function Show-ScanFoldersDialog {
+    $candidates = @(Get-GSVScanRootCandidates)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Where should GameSaveVault look for game saves?'
+    $dlg.Size = New-Object System.Drawing.Size(900, 660)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(700, 460)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.MinimizeBox = $false
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Choose the drives or folders to search. GameSaveVault scans only the folders you tick (and their subfolders), then stores what it finds in the scan database. Nothing is scanned automatically."
+    $lbl.Location = New-Object System.Drawing.Point(14, 12)
+    $lbl.Size = New-Object System.Drawing.Size(860, 36)
+    $lbl.Anchor = 'Top,Left,Right'
+
+    $clb = New-Object System.Windows.Forms.CheckedListBox
+    $clb.Location = New-Object System.Drawing.Point(14, 54)
+    $clb.Size = New-Object System.Drawing.Size(860, 470)
+    $clb.Anchor = 'Top,Bottom,Left,Right'
+    $clb.CheckOnClick = $true
+    $clb.IntegralHeight = $false
+    $clb.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $clb.DisplayMember = 'Display'
+
+    if ($candidates.Count -eq 0) {
+        [void]$clb.Items.Add([pscustomobject]@{ Path = ''; Kind = ''; Note = ''; Display = '(no drives or folders found)'; Selected = $false })
+    } else {
+        foreach ($c in $candidates) {
+            $idx = $clb.Items.Add($c)
+            $clb.SetItemChecked($idx, [bool]$c.Selected)
+        }
+    }
+
+    $chkStandard = New-Object System.Windows.Forms.CheckBox
+    $chkStandard.Text = 'Also include standard launcher / emulator save folders (Steam userdata, AppData, Saved Games, emulator saves)'
+    $chkStandard.Location = New-Object System.Drawing.Point(14, 530)
+    $chkStandard.Size = New-Object System.Drawing.Size(860, 24)
+    $chkStandard.Anchor = 'Bottom,Left,Right'
+    $chkStandard.Checked = $true
+    $existingDb = Read-GSVScanDatabase
+    if ($existingDb -and ($existingDb.PSObject.Properties.Name -contains 'IncludeStandard')) {
+        $chkStandard.Checked = [bool]$existingDb.IncludeStandard
+    }
+
+    $panel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $panel.Dock = 'Bottom'
+    $panel.Height = 48
+    $panel.Padding = New-Object System.Windows.Forms.Padding(8, 8, 8, 6)
+    $panel.WrapContents = $false
+
+    $btnBrowse = New-TopButton 'Browse folder...' 120 'Add a folder that is not in the list'
+    $btnAll = New-TopButton 'Check all' 90
+    $btnNone = New-TopButton 'Uncheck all' 100
+    $btnScan = New-TopButton 'Scan selected' 120 'Scan the ticked folders and store the results'
+    $btnCancel = New-TopButton 'Cancel' 80
+
+    $btnAll.Add_Click({ for ($i = 0; $i -lt $clb.Items.Count; $i++) { $clb.SetItemChecked($i, $true) } })
+    $btnNone.Add_Click({ for ($i = 0; $i -lt $clb.Items.Count; $i++) { $clb.SetItemChecked($i, $false) } })
+
+    $btnBrowse.Add_Click({
+        $picked = Select-Folder 'Choose a folder to scan'
+        if (-not $picked) { return }
+        try { $full = (Get-Item -LiteralPath $picked -ErrorAction Stop).FullName } catch { return }
+
+        for ($i = 0; $i -lt $clb.Items.Count; $i++) {
+            $it = $clb.Items[$i]
+            if ($it -and $it.Path -and ([string]$it.Path).TrimEnd('\') -ieq $full.TrimEnd('\')) {
+                $clb.SetItemChecked($i, $true)
+                return
+            }
+        }
+
+        $obj = [pscustomobject]@{
+            Path     = $full
+            Kind     = 'Folder'
+            Note     = 'custom folder'
+            Display  = ('{0}  -  custom folder' -f $full)
+            Selected = $true
+        }
+        $idx = $clb.Items.Add($obj)
+        $clb.SetItemChecked($idx, $true)
+    })
+
+    $btnScan.Add_Click({
+        $picked = New-Object System.Collections.Generic.List[string]
+        foreach ($it in $clb.CheckedItems) {
+            if ($it -and $it.Path) { $picked.Add([string]$it.Path) }
+        }
+        if ($picked.Count -eq 0) {
+            Show-Warn 'Tick at least one folder to scan.'
+            return
+        }
+        $dlg.Tag = [pscustomobject]@{
+            Roots           = $picked.ToArray()
+            IncludeStandard = [bool]$chkStandard.Checked
+        }
+        $dlg.Close()
+    })
+
+    $btnCancel.Add_Click({ $dlg.Close() })
+
+    $panel.Controls.AddRange(@($btnBrowse, $btnAll, $btnNone, $btnScan, $btnCancel))
+    $dlg.Controls.Add($clb)
+    $dlg.Controls.Add($chkStandard)
+    $dlg.Controls.Add($lbl)
+    $dlg.Controls.Add($panel)
+
+    [void]$dlg.ShowDialog()
+    $result = $dlg.Tag
+    $dlg.Dispose()
+
+    if ($result -and $result.Roots -and @($result.Roots).Count -gt 0) { return $result }
+    return $null
+}
+
+function Read-GuiRestoreFormat {
+    param([string]$Title = 'Restore location')
+
+    $format = Read-GuiText $Title "Restore to:`n  profile    = current Windows profile (default)`n  verbatim   = the original C: layout, exactly as saved`n  folder     = the folder you pick below, keeping <TOKEN>\<path> structure`nType one:" 'profile'
+    if (-not $format) { return $null }
+
+    $fmt = $format.Trim().ToLowerInvariant()
+    if ($fmt -notin @('profile', 'verbatim', 'folder')) {
+        Show-Warn "Unknown restore format: $format. Use profile, verbatim or folder."
+        return $null
+    }
+
+    $root = ''
+    if ($fmt -eq 'folder') {
+        $root = Select-Folder 'Choose the folder every save should be copied into'
+        if (-not $root) { return $null }
+    }
+
+    return [pscustomobject]@{ Format = $fmt; Root = $root }
+}
+
 function Show-VaultLocationDialog {
     $current = [string]$script:Vault
 
@@ -349,6 +486,9 @@ function Show-DeepScanDialog {
         return
     }
 
+    # Keep the stored database in sync with this ad-hoc deep scan.
+    try { $null = Update-GSVScanDatabase -Roots $roots.ToArray() -Locations $locs } catch { }
+
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = ('Deep scan results  -  {0} save location(s)' -f $locs.Count)
     $dlg.Size = New-Object System.Drawing.Size(1120, 620)
@@ -406,6 +546,7 @@ function Show-DeepScanDialog {
     $dlg.Controls.Add($panel)
     [void]$dlg.ShowDialog()
     $dlg.Dispose()
+    Load-ScanDatabase
 }
 
 function Show-MigrateDialog {
@@ -957,10 +1098,13 @@ function New-TopButton {
     return $b
 }
 
-$btnScan     = New-TopButton 'Rescan' 90 'Detect installed games and save folders'
+$btnScan     = New-TopButton 'Scan folders...' 120 'Choose drives/folders to scan; results are stored in the scan database'
+$btnRescan   = New-TopButton 'Rescan' 80 'Re-scan the folders already stored in the scan database'
 $btnBackup   = New-TopButton 'Backup selected' 130 'Back up the checked games'
 $btnBackupAll = New-TopButton 'Backup all' 100 'Back up every detected game'
-$btnRestore  = New-TopButton 'Restore...' 100 'Restore a snapshot from the vault'
+$btnRestore  = New-TopButton 'Restore...' 100 'Restore a snapshot from this PC''s vault'
+$btnRestoreFile = New-TopButton 'Restore file...' 110 'Restore saves on another PC from a portable .gsvdb database file'
+$btnExportDb = New-TopButton 'Export DB...' 110 'Write one portable .gsvdb file containing saves + the scan database'
 $btnOld      = New-TopButton 'Windows.old...' 120 'Recover saves from C:\Windows.old'
 $btnDeep     = New-TopButton 'Deep scan...' 110 'Search a whole drive for CPY / GSE / scene / Steam / UWP saves'
 $btnMigrate  = New-TopButton 'Migrate...' 90 'Copy console-emulator saves between emulators (Eden / Ryujinx / Eglantine / Kyty)'
@@ -970,7 +1114,7 @@ $btnVault    = New-TopButton 'Open vault' 100 'Open the backup folder'
 $btnVaultLoc = New-TopButton 'Backup location...' 150 'Choose where backups are stored (default vault folder)'
 $btnDoctor   = New-TopButton 'Doctor' 80 'Check vault health'
 
-$top.Controls.AddRange(@($btnScan, $btnBackup, $btnBackupAll, $btnRestore, $btnOld, $btnDeep, $btnMigrate, $btnAdd, $btnRules, $btnVault, $btnVaultLoc, $btnDoctor))
+$top.Controls.AddRange(@($btnScan, $btnRescan, $btnBackup, $btnBackupAll, $btnRestore, $btnRestoreFile, $btnExportDb, $btnOld, $btnDeep, $btnMigrate, $btnAdd, $btnRules, $btnVault, $btnVaultLoc, $btnDoctor))
 
 $list = New-Object System.Windows.Forms.ListView
 $list.Dock = 'Fill'
@@ -1031,81 +1175,163 @@ function Update-VaultLabel {
     $vaultLabel.Text = 'Vault: ' + $script:Vault
 }
 
-function Load-Games {
+function Load-ScanDatabase {
     $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $statusLabel.Text = 'Scanning installed games and save folders...'
+    $statusLabel.Text = 'Loading stored scan database...'
     $form.Refresh()
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
-        $script:Games = @(Get-GSVAllGames -Settings $script:Settings)
-        $script:Global = @(Get-GSVGlobalSaveLocations -Settings $script:Settings -NoSize)
-        $script:Emulators = @(Get-GSVEmulatorSaveLocations -Settings $script:Settings -NoSize)
+        $db = Read-GSVScanDatabase
+        $locs = @(Get-GSVScanDatabaseLocations)
+        $script:Games = @()
+        $script:Global = @()
+        $script:Emulators = @()
 
         $list.BeginUpdate()
         $list.Items.Clear()
 
-        if ($script:Global.Count -gt 0) {
-            $files = 0; $bytes = [int64]0
-            foreach ($l in $script:Global) { $files += [int](0 + $l.FileCount); $bytes += [int64](0 + $l.Bytes) }
-            $item = New-Object System.Windows.Forms.ListViewItem('Global launcher / emulator saves')
-            [void]$item.SubItems.Add('Global')
-            [void]$item.SubItems.Add([string]$script:Global.Count)
-            [void]$item.SubItems.Add((Format-GSVSize $bytes))
-            [void]$item.SubItems.Add('Ubisoft Connect / Goldberg / scene release save folders')
-            $item.Tag = [pscustomobject]@{ Name = 'Global launcher / emulator saves'; Source = 'Global'; Locations = $script:Global }
-            $item.Checked = $true
-            $item.Font = New-Object System.Drawing.Font($list.Font, [System.Drawing.FontStyle]::Bold)
-            [void]$list.Items.Add($item)
+        if (-not $db -or $locs.Count -eq 0) {
+            $list.EndUpdate()
+            $statusLabel.Text = 'No scan database yet. Click "Scan folders..." to choose where to look.'
+            return
         }
 
-        foreach ($group in @($script:Emulators | Group-Object Source | Sort-Object Name)) {
+        $groups = @($locs | Group-Object { '{0}|{1}' -f [string]$_.GameName, [string]$_.AppId })
+        $games = New-Object System.Collections.Generic.List[object]
+
+        foreach ($group in ($groups | Sort-Object Name)) {
             $groupLocs = @($group.Group)
-            $bytes = [int64]0
-            foreach ($l in $groupLocs) { $bytes += [int64](0 + $l.Bytes) }
-            $paths = @($groupLocs | ForEach-Object { $_.ResolvedPath })
-            $preview = ($paths | Select-Object -First 3) -join '; '
-            $item = New-Object System.Windows.Forms.ListViewItem(("{0} emulator saves ({1} titles)" -f $group.Name, $groupLocs.Count))
-            [void]$item.SubItems.Add('Emulator')
+            if ($groupLocs.Count -eq 0) { continue }
+            $first = $groupLocs[0]
+
+            $files = 0; $bytes = [int64]0
+            foreach ($l in $groupLocs) {
+                $files += [int](0 + $l.FileCount)
+                $bytes += [int64](0 + $l.Bytes)
+            }
+
+            $paths = @($groupLocs | Where-Object { $_.Kind -ne 'Registry' -and $_.ResolvedPath } | ForEach-Object { [string]$_.ResolvedPath })
+            $preview = if ($paths.Count -eq 0) { '(registry only)' } else { ($paths | Select-Object -First 3) -join '; ' }
+
+            $item = New-Object System.Windows.Forms.ListViewItem([string]$first.GameName)
+            [void]$item.SubItems.Add([string]$first.Source)
             [void]$item.SubItems.Add([string]$groupLocs.Count)
             [void]$item.SubItems.Add((Format-GSVSize $bytes))
             [void]$item.SubItems.Add($preview)
-            $item.Tag = [pscustomobject]@{ Name = $group.Name; Source = 'Emulator'; Locations = $groupLocs }
-            $item.Checked = $true
-            $item.Font = New-Object System.Drawing.Font($list.Font, [System.Drawing.FontStyle]::Bold)
+
+            $game = [pscustomobject]@{
+                Name      = [string]$first.GameName
+                Source    = [string]$first.Source
+                AppId     = [string]$first.AppId
+                Locations = $groupLocs
+            }
+            $item.Tag = $game
+
+            $missing = @($groupLocs | Where-Object { -not $_.Exists })
+            $item.Checked = ($missing.Count -lt $groupLocs.Count)
+            if ($missing.Count -eq $groupLocs.Count) { $item.ForeColor = [System.Drawing.Color]::Gray }
+
             [void]$list.Items.Add($item)
+            $games.Add($game)
         }
 
-        $withSaves = @($script:Games | Where-Object { @($_.Locations).Count -gt 0 })
-        $without = @($script:Games | Where-Object { @($_.Locations).Count -eq 0 })
-
-        foreach ($g in @($withSaves + $without)) {
-            $locs = @($g.Locations)
-            $files = 0; $bytes = [int64]0
-            foreach ($l in $locs) { $files += [int](0 + $l.FileCount); $bytes += [int64](0 + $l.Bytes) }
-
-            $paths = @($locs | Where-Object { $_.Kind -ne 'Registry' } | ForEach-Object { $_.ResolvedPath })
-            $preview = if ($paths.Count -eq 0) { '(no save folder found)' } else { ($paths | Select-Object -First 3) -join '; ' }
-
-            $item = New-Object System.Windows.Forms.ListViewItem([string]$g.Name)
-            [void]$item.SubItems.Add([string]$g.Source)
-            [void]$item.SubItems.Add([string]$locs.Count)
-            [void]$item.SubItems.Add((Format-GSVSize $bytes))
-            [void]$item.SubItems.Add($preview)
-            $item.Tag = $g
-            $item.Checked = ($locs.Count -gt 0)
-            if ($locs.Count -eq 0) { $item.ForeColor = [System.Drawing.Color]::Gray }
-            [void]$list.Items.Add($item)
-        }
-
+        $script:Games = $games.ToArray()
         $list.EndUpdate()
-        $statusLabel.Text = ('{0} games detected, {1} with save folders. Vault: {2}' -f $script:Games.Count, $withSaves.Count, $script:Vault)
+
+        $updated = if ($db.UpdatedUtc) { ([datetime]$db.UpdatedUtc).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { 'unknown' }
+        $statusLabel.Text = ('{0} games, {1} save locations from scan database (updated {2}). Vault: {3}' -f $script:Games.Count, $locs.Count, $updated, $script:Vault)
+    } catch {
+        Show-Error "Could not load the scan database: $($_.Exception.Message)"
+        $statusLabel.Text = 'Could not load the scan database.'
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+}
+
+# Kept as a compatibility alias: the app now loads the stored database instead
+# of scanning automatically.
+function Load-Games {
+    Load-ScanDatabase
+}
+
+function Invoke-GuiScanRoots {
+    param([string[]]$Roots, [bool]$IncludeStandard = $true)
+
+    $roots = @($Roots | Where-Object { $_ })
+    if ($roots.Count -eq 0) { return }
+
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $statusLabel.Text = ('Scanning {0} folder(s)...' -f $roots.Count)
+    $form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $progress = {
+        param($folders, $path)
+        $statusLabel.Text = ('Scanning: {0:N0} folders... {1}' -f $folders, $path)
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    try {
+        $locs = @(Get-GSVDeepScanLocations -Roots $roots -MaxDepth 12 -MaxResults 2000 -NoSize -Progress $progress)
+
+        $all = New-Object System.Collections.Generic.List[object]
+        foreach ($l in $locs) { $all.Add($l) }
+
+        if ($IncludeStandard) {
+            $statusLabel.Text = 'Checking standard launcher / emulator save folders...'
+            [System.Windows.Forms.Application]::DoEvents()
+
+            foreach ($g in @(Get-GSVAllGames -Settings $script:Settings)) {
+                foreach ($l in @($g.Locations)) {
+                    if (-not $l) { continue }
+                    $l | Add-Member -NotePropertyName ScanRoot -NotePropertyValue 'standard' -Force
+                    $all.Add($l)
+                }
+            }
+            foreach ($l in @(Get-GSVGlobalSaveLocations -Settings $script:Settings -NoSize)) {
+                if (-not $l) { continue }
+                $l | Add-Member -NotePropertyName ScanRoot -NotePropertyValue 'standard' -Force
+                $all.Add($l)
+            }
+            foreach ($l in @(Get-GSVEmulatorSaveLocations -Settings $script:Settings -NoSize)) {
+                if (-not $l) { continue }
+                $l | Add-Member -NotePropertyName ScanRoot -NotePropertyValue 'standard' -Force
+                $all.Add($l)
+            }
+        }
+
+        $saved = Update-GSVScanDatabase -Roots $roots -Locations $all.ToArray() -IncludeStandard:$IncludeStandard
+        Load-ScanDatabase
+
+        if ($all.Count -eq 0) {
+            Show-Warn "No save folders were found in the selected folders.`n`nTry selecting a whole drive or another game folder.`n`nDatabase: $($saved.Path)"
+        } else {
+            Show-Info ("Scan complete.`n`nFolders scanned: {0}`nSave locations found: {1}`nStored in database: {2}`n`n{3}" -f $roots.Count, $all.Count, $saved.Total, $saved.Path) 'Scan complete'
+        }
     } catch {
         Show-Error "Scan failed: $($_.Exception.Message)"
         $statusLabel.Text = 'Scan failed.'
     } finally {
         $form.Cursor = [System.Windows.Forms.Cursors]::Default
     }
+}
+
+function Rescan-StoredRoots {
+    $db = Read-GSVScanDatabase
+    $roots = @(Get-GSVScanDatabaseRoots | ForEach-Object { [string]$_.Path })
+    if ($roots.Count -eq 0) {
+        $choice = Show-ScanFoldersDialog
+        if ($choice) {
+            Invoke-GuiScanRoots -Roots $choice.Roots -IncludeStandard:$choice.IncludeStandard
+        } else {
+            Load-ScanDatabase
+        }
+        return
+    }
+
+    $includeStandard = if ($db -and ($db.PSObject.Properties.Name -contains 'IncludeStandard')) { [bool]$db.IncludeStandard } else { $true }
+    Invoke-GuiScanRoots -Roots $roots -IncludeStandard:$includeStandard
 }
 
 function Invoke-GuiBackup {
@@ -1135,12 +1361,148 @@ function Invoke-GuiBackup {
     }
 }
 
+function Invoke-GuiExportDatabase {
+    $db = Read-GSVScanDatabase
+    $locs = @(Get-GSVScanDatabaseLocations -OnlyExisting)
+    $snaps = @(Get-GSVSnapshots -BackupRoot $script:Vault)
+
+    if ($locs.Count -eq 0 -and $snaps.Count -eq 0) {
+        Show-Warn 'Nothing to export yet. Scan your game folders and back them up first.'
+        return
+    }
+
+    if ($snaps.Count -eq 0) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "No backup snapshot exists yet.`n`nCreate one now from the scan database ($($locs.Count) save location(s)), then write the portable database?",
+            'Export portable database',
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $statusLabel.Text = 'Creating backup snapshot...'
+        $form.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $null = New-GSVSnapshot -Locations $locs -BackupRoot $script:Vault -Label 'portable-db'
+        } catch {
+            Show-Error "Could not create the backup snapshot: $($_.Exception.Message)"
+            return
+        } finally {
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        }
+    }
+
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Title = 'Save the portable GameSaveVault database'
+    $sfd.Filter = 'GameSaveVault database (*.gsvdb)|*.gsvdb|Zip archive (*.zip)|*.zip'
+    $sfd.DefaultExt = 'gsvdb'
+    $sfd.AddExtension = $true
+    $sfd.FileName = ('GameSaveVault-{0}.gsvdb' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    if ($sfd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $statusLabel.Text = 'Writing portable database...'
+    $form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    try {
+        $r = New-GSVPortableDatabase -BackupRoot $script:Vault -Snapshot 'latest' -OutputPath $sfd.FileName -IncludeScanDatabase -Force
+        Show-Info ("Portable database created.`n`nFile: {0}`nSize: {1}`nSnapshot: {2}`nEntries: {3}`nFiles: {4}`n`nCopy this one file to the other PC, then click ""Restore file..."" there." -f $r.Path, (Format-GSVSize $r.Bytes), $r.SnapshotName, $r.EntryCount, $r.TotalFiles) 'Export complete'
+        $statusLabel.Text = ('Portable database written: {0}' -f $r.Path)
+    } catch {
+        Show-Error "Export failed: $($_.Exception.Message)"
+        $statusLabel.Text = 'Export failed.'
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+}
+
+function Invoke-GuiRestoreFromFile {
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Title = 'Select a GameSaveVault database file'
+    $ofd.Filter = 'GameSaveVault database (*.gsvdb;*.zip)|*.gsvdb;*.zip|Scan database (*.json)|*.json|All files (*.*)|*.*'
+    if ($ofd.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+
+    $path = $ofd.FileName
+    $ext = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
+
+    # A plain scan-database.json only lists paths. Import it so the list is
+    # available on this PC, but explain that the .gsvdb file carries the saves.
+    if ($ext -eq '.json') {
+        try {
+            $imp = Import-GSVScanDatabaseFile -Path $path
+            Load-ScanDatabase
+            Show-Info ("Imported the scan database.`n`nLocations in file: {0}`nStored total: {1}`n`nThis file lists where saves belong. To restore the save files themselves, use the portable .gsvdb file created with ""Export DB...""." -f $imp.Imported, $imp.Total) 'Scan database imported'
+        } catch {
+            Show-Error "Could not import the scan database: $($_.Exception.Message)"
+        }
+        return
+    }
+
+    try {
+        $info = Get-GSVPortableDatabaseInfo -Path $path
+    } catch {
+        Show-Error "This is not a readable GameSaveVault database: $($_.Exception.Message)"
+        return
+    }
+
+    $choice = Read-GuiRestoreFormat -Title 'Restore from database file'
+    if (-not $choice) { return }
+
+    $where = if ($choice.Format -eq 'profile') { 'your current Windows profile' }
+        elseif ($choice.Format -eq 'verbatim') { 'the original drive layout (verbatim)' }
+        else { "the folder:`n$($choice.Root)`n(keeps the <TOKEN>\<path> structure)" }
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        ("Restore this portable database?`n`nFile: {0}`nFrom PC: {1}`nEntries: {2}`nFiles: {3}`n`nRestore to:`n{4}`n`nExisting saves are moved to the vault's rollback folder first." -f $info.Path, $info.Machine, $info.EntryCount, $info.TotalFiles, $where),
+        'Confirm restore from file',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $statusLabel.Text = 'Restoring from portable database...'
+    $form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    try {
+        $r = Restore-GSVPortableDatabase -BundlePath $path -BackupRoot $script:Vault `
+            -RestoreFormat $choice.Format -RestoreRoot $choice.Root
+        $msg = "Restore complete.`n`nRestored: $($r.Restored)`nRegistry keys: $($r.Registry)`nSkipped: $($r.Skipped)`nFailed: $($r.Failed)`nScan database imported: $($r.ImportedDatabase)"
+        if (@($r.Messages).Count -gt 0) {
+            $msg += "`n`nDetails:`n" + (($r.Messages | Select-Object -First 8) -join "`n")
+        }
+        Show-Info $msg 'Restore from file complete'
+        Load-ScanDatabase
+        $statusLabel.Text = ('Restore from file complete: {0} restored, {1} failed' -f $r.Restored, $r.Failed)
+    } catch {
+        Show-Error "Restore from file failed: $($_.Exception.Message)"
+        $statusLabel.Text = 'Restore from file failed.'
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+}
+
 #endregion
 
 #region ---------------------------------------------------------------- events
 
 $btnScan.Add_Click({
-    Load-Games
+    $choice = Show-ScanFoldersDialog
+    if ($choice) { Invoke-GuiScanRoots -Roots $choice.Roots -IncludeStandard:$choice.IncludeStandard }
+})
+
+$btnRescan.Add_Click({
+    Rescan-StoredRoots
+})
+
+$btnExportDb.Add_Click({
+    Invoke-GuiExportDatabase
+})
+
+$btnRestoreFile.Add_Click({
+    Invoke-GuiRestoreFromFile
 })
 
 $btnDeep.Add_Click({
@@ -1303,6 +1665,9 @@ $btnDoctor.Add_Click({
     $lines.Add('Vault on C:     : ' + $script:Vault.StartsWith($env:SystemDrive, [StringComparison]::OrdinalIgnoreCase))
     $lines.Add('Catalog entries : ' + (@(Get-GSVCatalog).Count))
     $lines.Add('Custom games    : ' + (@(Get-GSVCustomGames).Count))
+    $scanDb = Read-GSVScanDatabase
+    $scanLocs = if ($scanDb) { @(Get-GSVScanDatabaseLocations).Count } else { 0 }
+    $lines.Add('Scan database   : ' + $(if ($scanDb) { "$scanLocs locations" } else { 'none' }))
     $lines.Add('Installed games : ' + $script:Games.Count)
     $lines.Add('Snapshots       : ' + (@(Get-GSVSnapshots -BackupRoot $script:Vault).Count))
     $old = @(Get-GSVWindowsOldRoots)
@@ -1338,7 +1703,17 @@ $list.Add_ItemCheck({
 })
 
 $form.Add_Shown({
-    Load-Games
+    $db = Read-GSVScanDatabase
+    if ($db -and @($db.Locations).Count -gt 0) {
+        Load-ScanDatabase
+    } else {
+        $choice = Show-ScanFoldersDialog
+        if ($choice) {
+            Invoke-GuiScanRoots -Roots $choice.Roots -IncludeStandard:$choice.IncludeStandard
+        } else {
+            $statusLabel.Text = 'No folders selected. Click "Scan folders..." to choose where to look.'
+        }
+    }
 })
 
 #endregion

@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/MISTERNEGATIVE21/GameSaveVault/data/scan-database.schema.json",
+  "title": "GameSaveVault scan database",
+  "description": "Folders the user chose to scan and the game-save locations found in them.",
+  "type": "object",
+  "required": ["Version", "Roots", "Locations"],
+  "properties": {
+    "Version": { "type": "integer", "const": 1 },
+    "Tool": { "type": "string" },
+    "ToolVersion": { "type": "string" },
+    "CreatedUtc": { "type": "string" },
+    "UpdatedUtc": { "type": "string" },
+    "IncludeStandard": {
+      "type": "boolean",
+      "description": "Also include standard launcher / emulator save folders in the stored results."
+    },
+    "Roots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["Path"],
+        "properties": {
+          "Path": { "type": "string" },
+          "ScannedUtc": { "type": "string" },
+          "LocationCount": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "Locations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["GameName", "Kind"],
+        "properties": {
+          "GameId": { "type": "string" },
+          "GameName": { "type": "string" },
+          "Source": { "type": "string" },
+          "AppId": { "type": "string" },
+          "InstallDirHint": { "type": "string" },
+          "Token": { "type": "string" },
+          "RelativePath": { "type": "string" },
+          "AbsolutePath": { "type": "string" },
+          "ResolvedPath": { "type": "string" },
+          "Kind": { "type": "string", "enum": ["Directory", "File", "Registry"] },
+          "RegistryKey": { "type": "string" },
+          "Note": { "type": "string" },
+          "Origin": { "type": "string" },
+          "RuleId": { "type": "string" },
+          "RestoreMode": { "type": "string" },
+          "InstallDirNames": { "type": "array", "items": { "type": "string" } },
+          "FilePatterns": { "type": "array", "items": { "type": "string" } },
+          "FileCount": { "type": ["integer", "null"] },
+          "Bytes": { "type": ["integer", "null"] },
+          "ScanRoot": { "type": "string" },
+          "DiscoveredUtc": { "type": "string" }
+        }
+      }
+    }
+  }
+}

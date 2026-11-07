@@ -11,6 +11,7 @@ $script:Root       = Split-Path -Parent $PSScriptRoot
 $script:ConfigDir  = if ($env:GSV_CONFIG_DIR) { $env:GSV_CONFIG_DIR } else { Join-Path $script:Root 'config' }
 $script:SettingsPath = Join-Path $script:ConfigDir 'settings.json'
 $script:CustomPath   = Join-Path $script:ConfigDir 'games.custom.json'
+$script:ScanDbPath   = Join-Path $script:ConfigDir 'scan-database.json'
 $script:CatalogPath  = Join-Path $script:Root 'data\catalog.psd1'
 $script:Catalog      = $null
 $script:Settings     = $null
@@ -2924,6 +2925,377 @@ function Get-GSVDeepScanLocations {
     }
 
     return $results.ToArray()
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- scan database
+
+function Get-GSVScanDatabasePath { return $script:ScanDbPath }
+
+function New-GSVScanDatabaseObject {
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    return [pscustomobject]([ordered]@{
+        Version     = 1
+        Tool        = 'GameSaveVault'
+        ToolVersion = $script:GSVVersion
+        CreatedUtc  = $now
+        UpdatedUtc  = $now
+        IncludeStandard = $true
+        Roots       = @()
+        Locations   = @()
+    })
+}
+
+function Read-GSVScanDatabase {
+    $db = Read-GSVJson -Path $script:ScanDbPath
+    if (-not $db) { return $null }
+
+    foreach ($name in @('Version','Tool','ToolVersion','CreatedUtc','UpdatedUtc','IncludeStandard','Roots','Locations')) {
+        if (-not ($db.PSObject.Properties.Name -contains $name)) {
+            $default = if ($name -eq 'Roots' -or $name -eq 'Locations') { @() } elseif ($name -eq 'IncludeStandard') { $true } else { $null }
+            $db | Add-Member -NotePropertyName $name -NotePropertyValue $default -Force
+        }
+    }
+    return $db
+}
+
+function Save-GSVScanDatabase {
+    param($Database)
+    if (-not $Database) { return }
+    $Database.UpdatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    Write-GSVTextFile -Path $script:ScanDbPath -Text ($Database | ConvertTo-Json -Depth 12)
+}
+
+function Get-GSVScanLocationKey {
+    param($Location)
+    if (-not $Location) { return '' }
+    if ([string]$Location.Kind -eq 'Registry' -and $Location.RegistryKey) {
+        return ('reg|' + ([string]$Location.RegistryKey).ToLowerInvariant())
+    }
+    if ($Location.Token) {
+        return (('{0}|{1}' -f $Location.Token, $Location.RelativePath).ToLowerInvariant())
+    }
+    if ($Location.AbsolutePath) {
+        return ('abs|' + ([string]$Location.AbsolutePath).TrimEnd('\').ToLowerInvariant())
+    }
+    if ($Location.ResolvedPath) {
+        return ('abs|' + ([string]$Location.ResolvedPath).TrimEnd('\').ToLowerInvariant())
+    }
+    return ''
+}
+
+function Find-GSVScanRootForPath {
+    param([string]$Path, [string[]]$Roots)
+    if (-not $Path -or -not $Roots) { return '' }
+    $best = ''
+    foreach ($r in @($Roots)) {
+        if (-not $r) { continue }
+        $root = ([string]$r).TrimEnd('\')
+        if (-not $root) { continue }
+        if ($Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            if ($root.Length -gt $best.Length) { $best = $root }
+        }
+    }
+    return $best
+}
+
+function ConvertTo-GSVScanDbLocation {
+    param($Location, [string]$ScanRoot = '')
+    if (-not $Location) { return $null }
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    return [pscustomobject]([ordered]@{
+        GameId          = [string]$Location.GameId
+        GameName        = [string]$Location.GameName
+        Source          = [string]$Location.Source
+        AppId           = [string]$Location.AppId
+        InstallDirHint  = [string]$Location.InstallDirHint
+        Token           = [string]$Location.Token
+        RelativePath    = [string]$Location.RelativePath
+        AbsolutePath    = [string]$Location.AbsolutePath
+        ResolvedPath    = [string]$Location.ResolvedPath
+        Kind            = if ($Location.Kind) { [string]$Location.Kind } else { 'Directory' }
+        RegistryKey     = [string]$Location.RegistryKey
+        Note            = [string]$Location.Note
+        Origin          = [string]$Location.Origin
+        RuleId          = [string]$Location.RuleId
+        RestoreMode     = [string]$Location.RestoreMode
+        InstallDirNames = @($Location.InstallDirNames | Where-Object { $_ })
+        FilePatterns    = @($Location.FilePatterns | Where-Object { $_ })
+        FileCount       = $Location.FileCount
+        Bytes           = $Location.Bytes
+        ScanRoot        = [string]$ScanRoot
+        DiscoveredUtc   = $now
+    })
+}
+
+function Update-GSVScanDatabase {
+    param(
+        [string[]]$Roots = @(),
+        [object[]]$Locations = @(),
+        [switch]$Replace,
+        [switch]$IncludeStandard
+    )
+
+    $db = Read-GSVScanDatabase
+    if (-not $db) { $db = New-GSVScanDatabaseObject }
+
+    $standardSpecified = $PSBoundParameters.ContainsKey('IncludeStandard')
+    if ($standardSpecified) { $db.IncludeStandard = [bool]$IncludeStandard }
+
+    $rootList = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Roots)) {
+        if (-not $r) { continue }
+        $full = ([string]$r).TrimEnd('\')
+        if (-not $full) { continue }
+        if (-not $rootList.Contains($full)) { $rootList.Add($full) }
+    }
+    $rootArray = $rootList.ToArray()
+
+    # Drop the previous results for the roots that are being rescanned. Other
+    # roots stay untouched, so users can scan one drive at a time.
+    $keepRoots = New-Object System.Collections.Generic.List[object]
+    foreach ($existing in @($db.Roots)) {
+        if (-not $existing) { continue }
+        $p = ([string]$existing.Path).TrimEnd('\')
+        if ($Replace -or -not ($rootArray -contains $p)) { $keepRoots.Add($existing) }
+    }
+
+    $keepLocs = New-Object System.Collections.Generic.List[object]
+    foreach ($existing in @($db.Locations)) {
+        if (-not $existing) { continue }
+        $sr = ([string]$existing.ScanRoot).TrimEnd('\')
+        if ($standardSpecified -and $sr -ieq 'standard') { continue }
+        if ($Replace -or -not ($rootArray -contains $sr)) { $keepLocs.Add($existing) }
+    }
+
+    $map = @{}
+    $order = New-Object System.Collections.Generic.List[string]
+    foreach ($l in $keepLocs.ToArray()) {
+        $key = Get-GSVScanLocationKey -Location $l
+        if (-not $key) { continue }
+        if (-not $map.ContainsKey($key)) { $order.Add($key) }
+        $map[$key] = $l
+    }
+
+    $added = 0
+    foreach ($loc in @($Locations)) {
+        if (-not $loc) { continue }
+        $scanRoot = if ($loc.ScanRoot) { [string]$loc.ScanRoot } else { Find-GSVScanRootForPath -Path ([string]$loc.ResolvedPath) -Roots $rootArray }
+        if (-not $scanRoot -and $rootArray.Count -gt 0) { $scanRoot = $rootArray[0] }
+        $normalized = ConvertTo-GSVScanDbLocation -Location $loc -ScanRoot $scanRoot
+        $key = Get-GSVScanLocationKey -Location $normalized
+        if (-not $key) { continue }
+        if (-not $map.ContainsKey($key)) { $order.Add($key) }
+        $map[$key] = $normalized
+        $added++
+    }
+
+    $finalLocs = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $order.ToArray()) {
+        if ($map.ContainsKey($key)) { $finalLocs.Add($map[$key]) }
+    }
+
+    foreach ($root in $rootArray) {
+        $count = 0
+        foreach ($l in $finalLocs.ToArray()) {
+            if (([string]$l.ScanRoot).TrimEnd('\') -ieq $root) { $count++ }
+        }
+        $keepRoots.Add([pscustomobject]@{
+            Path          = $root
+            ScannedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+            LocationCount = $count
+        })
+    }
+
+    $db.Roots = @($keepRoots.ToArray())
+    $db.Locations = @($finalLocs.ToArray())
+    Save-GSVScanDatabase -Database $db
+
+    return [pscustomobject]@{
+        Path        = $script:ScanDbPath
+        Roots       = $rootArray.Count
+        Added       = $added
+        Total       = $finalLocs.Count
+        Database    = $db
+    }
+}
+
+function Get-GSVScanDatabaseRoots {
+    $db = Read-GSVScanDatabase
+    if (-not $db) { return @() }
+    return @($db.Roots | Where-Object { $_ -and $_.Path })
+}
+
+function Get-GSVScanDatabaseLocations {
+    param([switch]$OnlyExisting)
+    $db = Read-GSVScanDatabase
+    if (-not $db) { return @() }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($l in @($db.Locations)) {
+        if (-not $l) { continue }
+        $exists = $false
+        if ([string]$l.Kind -eq 'Registry') {
+            $exists = $true
+        } elseif ($l.ResolvedPath) {
+            $exists = Test-Path -LiteralPath ([string]$l.ResolvedPath)
+        }
+        if ($OnlyExisting -and -not $exists) { continue }
+        $l | Add-Member -NotePropertyName Exists -NotePropertyValue $exists -Force
+        $result.Add($l)
+    }
+    return $result.ToArray()
+}
+
+function Import-GSVScanDatabaseFile {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Scan database not found: $Path" }
+
+    $incoming = Read-GSVJson -Path $Path
+    if (-not $incoming) { throw "Not a readable GameSaveVault scan database: $Path" }
+    if (-not ($incoming.PSObject.Properties.Name -contains 'Locations')) {
+        throw "The file is not a GameSaveVault scan database (no Locations list): $Path"
+    }
+
+    $db = Read-GSVScanDatabase
+    if (-not $db) { $db = New-GSVScanDatabaseObject }
+
+    $map = @{}
+    $order = New-Object System.Collections.Generic.List[string]
+    foreach ($l in @($db.Locations)) {
+        $key = Get-GSVScanLocationKey -Location $l
+        if (-not $key) { continue }
+        if (-not $map.ContainsKey($key)) { $order.Add($key) }
+        $map[$key] = $l
+    }
+
+    $imported = 0
+    foreach ($l in @($incoming.Locations)) {
+        if (-not $l) { continue }
+        $key = Get-GSVScanLocationKey -Location $l
+        if (-not $key) { continue }
+        if (-not $map.ContainsKey($key)) { $order.Add($key) }
+        $map[$key] = $l
+        $imported++
+    }
+
+    $finalLocs = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $order.ToArray()) {
+        if ($map.ContainsKey($key)) { $finalLocs.Add($map[$key]) }
+    }
+
+    $rootMap = @{}
+    foreach ($r in @($db.Roots)) {
+        if ($r -and $r.Path) { $rootMap[([string]$r.Path).TrimEnd('\').ToLowerInvariant()] = $r }
+    }
+    foreach ($r in @($incoming.Roots)) {
+        if ($r -and $r.Path) { $rootMap[([string]$r.Path).TrimEnd('\').ToLowerInvariant()] = $r }
+    }
+
+    $db.Roots = @($rootMap.Values)
+    $db.Locations = @($finalLocs.ToArray())
+    Save-GSVScanDatabase -Database $db
+
+    return [pscustomobject]@{
+        Path     = $Path
+        Imported = $imported
+        Total    = $finalLocs.Count
+        Database = $db
+    }
+}
+
+function Get-GSVScanRootCandidates {
+    $list = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+
+    $add = {
+        param([string]$Path, [string]$Kind, [string]$Note, [bool]$Selected)
+        if (-not $Path) { return }
+        try {
+            if (-not (Test-Path -LiteralPath $Path)) { return }
+            $full = (Get-Item -LiteralPath $Path -ErrorAction Stop).FullName
+        } catch { return }
+        if (-not $full) { return }
+        $key = $full.TrimEnd('\').ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return }
+        $seen[$key] = $true
+        $list.Add([pscustomobject]@{
+            Path     = $full
+            Kind     = $Kind
+            Note     = $Note
+            Display  = ('{0}  -  {1}' -f $full, $Note)
+            Selected = $Selected
+        })
+    }
+
+    $driveRoots = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+            try {
+                if (-not $d.IsReady) { continue }
+                if ($d.DriveType -ne [System.IO.DriveType]::Fixed -and
+                    $d.DriveType -ne [System.IO.DriveType]::Removable) { continue }
+                $root = $d.RootDirectory.FullName
+                $driveRoots.Add($root)
+                $freeGb = [math]::Round(($d.AvailableFreeSpace / 1GB), 0)
+                $label = if ($d.VolumeLabel) { $d.VolumeLabel } else { 'local disk' }
+                & $add $root 'Drive' ('whole {0} drive ({1} GB free)' -f $label, $freeGb) $false
+            } catch { }
+        }
+    } catch { }
+
+    $gameDirNames = @('Games','Game','SteamLibrary','GOG Games','Epic Games','PS5GAMES','SwitchGames','Emulators','ROMs')
+    foreach ($drive in $driveRoots.ToArray()) {
+        foreach ($name in $gameDirNames) {
+            $p = Join-Path $drive $name
+            if (Test-Path -LiteralPath $p) { & $add $p 'Game folder' ('common game folder ({0})' -f $name) $true }
+        }
+    }
+
+    foreach ($lib in @(Get-GSVSteamLibraries)) {
+        if ($lib) { & $add $lib 'Launcher' 'Steam library' $true }
+    }
+
+    $launcherCandidates = New-Object System.Collections.Generic.List[string]
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $base) { continue }
+        foreach ($n in @('Epic Games','EA Games','Ubisoft','Ubisoft\Ubisoft Game Launcher','GOG Galaxy\Games','Battle.net','Riot Games')) {
+            $launcherCandidates.Add((Join-Path $base $n))
+        }
+    }
+    foreach ($n in @('GOG Games','Epic Games','Games')) {
+        foreach ($drive in $driveRoots.ToArray()) { $launcherCandidates.Add((Join-Path $drive $n)) }
+    }
+    foreach ($p in $launcherCandidates.ToArray()) {
+        if (Test-Path -LiteralPath $p) { & $add $p 'Launcher' 'launcher / game library' $true }
+    }
+
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    $saved = Get-GSVSavedGamesPath
+    $roaming = $env:APPDATA
+    $local = $env:LOCALAPPDATA
+    $localLow = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'AppData\LocalLow' } else { '' }
+
+    if ($docs) {
+        & $add $docs 'Saves' 'Documents (My Games, publisher saves)' $true
+        & $add (Join-Path $docs 'My Games') 'Saves' 'Documents\My Games' $true
+    }
+    if ($saved) { & $add $saved 'Saves' 'Saved Games' $true }
+    if ($roaming) { & $add $roaming 'Saves' 'AppData\Roaming (per-user game data)' $false }
+    if ($local) { & $add $local 'Saves' 'AppData\Local (per-user game data)' $false }
+    if ($localLow) { & $add $localLow 'Saves' 'AppData\LocalLow (Unity saves)' $true }
+    if ($env:PUBLIC) {
+        & $add (Join-Path $env:PUBLIC 'Documents') 'Saves' 'Public Documents (scene / shared saves)' $true
+        & $add (Join-Path $env:PUBLIC 'Documents\Steam') 'Saves' 'Public Documents\Steam (scene saves)' $true
+    }
+    if ($env:ProgramData) { & $add $env:ProgramData 'Saves' 'ProgramData (shared game data)' $false }
+
+    foreach ($custom in @((Get-GSVSettings).GameScanRoots)) {
+        if ($custom) { & $add $custom 'Game folder' 'configured scan root' $true }
+    }
+
+    return $list.ToArray()
 }
 
 #endregion

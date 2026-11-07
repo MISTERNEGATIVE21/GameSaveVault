@@ -4,9 +4,13 @@
     saves) so they survive a Windows reinstall.
 
 .EXAMPLES
-    .\GameSaveVault.ps1 scan
-    .\GameSaveVault.ps1 scan -Detailed
+    .\GameSaveVault.ps1 roots
+    .\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"
+    .\GameSaveVault.ps1 scan-db
     .\GameSaveVault.ps1 backup -All
+    .\GameSaveVault.ps1 export-db -File D:\GameSaveVault.gsvdb
+    .\GameSaveVault.ps1 restore-db -File D:\GameSaveVault.gsvdb
+    .\GameSaveVault.ps1 scan -Detailed
     .\GameSaveVault.ps1 backup -Game Skyrim,Palworld
     .\GameSaveVault.ps1 snapshots
     .\GameSaveVault.ps1 restore -Snapshot latest -DryRun
@@ -209,19 +213,32 @@ function Show-Scan {
 function Invoke-Backup {
     Write-Title 'Backup game saves'
 
-    $games = @(Get-GSVAllGames -Settings $settings)
-    $selected = @(Select-GSVGamesByFilter -Games $games -Filter $Game)
-
-    if ($Game.Count -gt 0 -and $selected.Count -eq 0) {
-        throw "No installed game matched: $($Game -join ', ')"
-    }
-    if ($selected.Count -eq 0 -and $NoGlobal) {
-        throw 'No games detected and -NoGlobal was specified. Nothing to back up.'
-    }
+    $dbLocations = @(Get-GSVScanDatabaseLocations -OnlyExisting)
+    $useScanDb = ($Game.Count -eq 0 -and $dbLocations.Count -gt 0)
 
     $locations = New-Object System.Collections.Generic.List[object]
-    foreach ($g in $selected) {
-        foreach ($l in @($g.Locations)) { $locations.Add($l) }
+    $selectedCount = 0
+    $sourceLabel = 'catalog scan'
+
+    if ($useScanDb) {
+        foreach ($l in $dbLocations) { $locations.Add($l) }
+        $selectedCount = @($dbLocations | Group-Object { [string]$_.GameName }).Count
+        $sourceLabel = 'scan database'
+    } else {
+        $games = @(Get-GSVAllGames -Settings $settings)
+        $selected = @(Select-GSVGamesByFilter -Games $games -Filter $Game)
+
+        if ($Game.Count -gt 0 -and $selected.Count -eq 0) {
+            throw "No installed game matched: $($Game -join ', ')"
+        }
+        if ($selected.Count -eq 0 -and $NoGlobal) {
+            throw 'No games detected and -NoGlobal was specified. Nothing to back up.'
+        }
+
+        foreach ($g in $selected) {
+            foreach ($l in @($g.Locations)) { $locations.Add($l) }
+        }
+        $selectedCount = $selected.Count
     }
 
     if (-not $NoGlobal) {
@@ -246,7 +263,8 @@ function Invoke-Backup {
     if ($unique.Count -eq 0) { throw 'Nothing to back up.' }
 
     if (-not $Quiet) {
-        Write-Kv 'Games selected' $selected.Count
+        Write-Kv 'Games selected' $selectedCount
+        Write-Kv 'Source' $sourceLabel
         Write-Kv 'Save locations' $unique.Count
         Write-Kv 'Vault' $vault 'Yellow'
         if ($isDryRun) { Write-Host '  DRY RUN - no files will be written.' -ForegroundColor Yellow }
@@ -548,6 +566,8 @@ function Show-Doctor {
     Write-Kv 'Vault' $vault 'Yellow'
     Write-Kv 'Catalog entries' (@(Get-GSVCatalog).Count)
     Write-Kv 'Custom games' (@(Get-GSVCustomGames).Count)
+    $scanDb = Read-GSVScanDatabase
+    Write-Kv 'Scan database' ($(if ($scanDb) { '{0} locations from {1} root(s)' -f (@(Get-GSVScanDatabaseLocations).Count), (@($scanDb.Roots).Count) } else { 'none (run: roots, then scan-folders)' }))
     Write-Kv 'Steam roots' ((@(Get-GSVSteamRoots)) -join '; ')
     Write-Kv 'Steam libraries' (@(Get-GSVSteamLibraries).Count)
     Write-Kv 'Installed games found' (@(Get-GSVAllGames -Settings $settings -NoLocations).Count)
@@ -667,6 +687,234 @@ function Show-DeepScan {
     }
 }
 
+function Resolve-GSVScanFolderRoots {
+    param([string[]]$Values)
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($v in @($Values)) {
+        if (-not $v) { continue }
+        foreach ($part in ([string]$v -split '[;,]')) {
+            $p = $part.Trim()
+            if (-not $p) { continue }
+            if ($p -match '^[A-Za-z]$') { $p = $p + ':\' }
+            elseif ($p -match '^[A-Za-z]:$') { $p = $p + '\' }
+            if (-not (Test-Path -LiteralPath $p)) {
+                throw "Folder does not exist: $p"
+            }
+            $full = (Get-Item -LiteralPath $p -ErrorAction Stop).FullName
+            if (-not $roots.Contains($full)) { $roots.Add($full) }
+        }
+    }
+    return $roots.ToArray()
+}
+
+function Show-ScanRoots {
+    Write-Title 'Folders available for scanning'
+    $candidates = @(Get-GSVScanRootCandidates)
+    if ($candidates.Count -eq 0) {
+        Write-Host '  No drives or game folders found.' -ForegroundColor Yellow
+        return
+    }
+
+    $i = 0
+    foreach ($c in $candidates) {
+        $i++
+        $mark = if ($c.Selected) { '*' } else { ' ' }
+        Write-Host ('  {0,2}. [{1}] {2}' -f $i, $mark, $c.Display) -ForegroundColor Gray
+    }
+    Write-Host ''
+    Write-Host '  * = suggested default. Nothing is scanned until you choose folders.' -ForegroundColor DarkGray
+    Write-Kv 'Scan database' (Get-GSVScanDatabasePath) 'Yellow'
+    Write-Host '  Scan chosen folders:  .\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"' -ForegroundColor DarkGray
+    Write-Host '  Scan every drive:     .\GameSaveVault.ps1 scan-folders -AllDrives' -ForegroundColor DarkGray
+    Write-Host '  Show stored results:  .\GameSaveVault.ps1 scan-db' -ForegroundColor DarkGray
+}
+
+function Show-ScanDatabase {
+    Write-Title 'Stored scan database'
+    $db = Read-GSVScanDatabase
+    if (-not $db) {
+        Write-Host '  No scan database yet.' -ForegroundColor Yellow
+        Write-Host '  Choose folders first:  .\GameSaveVault.ps1 roots' -ForegroundColor DarkGray
+        return
+    }
+
+    $locs = @(Get-GSVScanDatabaseLocations)
+    Write-Kv 'Database' (Get-GSVScanDatabasePath) 'Yellow'
+    Write-Kv 'Last updated' ([string]$db.UpdatedUtc)
+    Write-Kv 'Roots' (@($db.Roots).Count)
+    Write-Kv 'Save locations' $locs.Count
+
+    foreach ($r in @($db.Roots)) {
+        if (-not $r) { continue }
+        Write-Host ('    ROOT  {0}  ({1} locations, {2})' -f $r.Path, $r.LocationCount, $r.ScannedUtc) -ForegroundColor DarkGray
+    }
+
+    if ($locs.Count -eq 0) {
+        Write-Host '  The database is empty. Run scan-folders.' -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host ''
+    $rows = foreach ($l in ($locs | Sort-Object GameName, ResolvedPath)) {
+        [pscustomobject]@{
+            Game    = $l.GameName
+            AppId   = $l.AppId
+            Exists  = if ($l.Exists) { 'yes' } else { 'no' }
+            Files   = if ($null -ne $l.FileCount) { $l.FileCount } else { '' }
+            Path    = if ($l.Kind -eq 'Registry') { $l.RegistryKey } else { $l.ResolvedPath }
+        }
+    }
+    $rows | Format-Table -AutoSize -Wrap | Out-String -Width 220 | Write-Host
+}
+
+function Invoke-ScanFolders {
+    Write-Title 'Scan selected folders for game saves'
+
+    $wanted = New-Object System.Collections.Generic.List[string]
+    if ($AllDrives) {
+        foreach ($r in @(Get-GSVFixedDriveRoots)) { $wanted.Add($r) }
+    }
+    if ($Target) { $wanted.Add($Target) }
+    foreach ($d in @($Drive)) { if ($d) { $wanted.Add($d) } }
+    foreach ($d in @($Directory)) { if ($d) { $wanted.Add($d) } }
+
+    if ($wanted.Count -eq 0) {
+        Write-Host '  Choose at least one folder or drive.' -ForegroundColor Yellow
+        Write-Host '  List folders:  .\GameSaveVault.ps1 roots' -ForegroundColor DarkGray
+        Write-Host '  Example:       .\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"' -ForegroundColor DarkGray
+        return
+    }
+
+    $roots = @(Resolve-GSVScanFolderRoots -Values $wanted.ToArray())
+    if ($roots.Count -eq 0) { throw 'No valid folders to scan.' }
+
+    if (-not $Quiet) {
+        Write-Kv 'Scanning' ($roots -join '; ') 'Yellow'
+        Write-Kv 'Max depth' $MaxDepth
+        Write-Kv 'Max results' $MaxResults
+        Write-Host '  Only the chosen folders and their subfolders are searched.' -ForegroundColor DarkGray
+    }
+
+    $progress = {
+        param($folders, $path)
+        if (-not $Quiet) { Write-Host ("  ... {0:N0} folders | {1}" -f $folders, $path) -ForegroundColor DarkGray }
+    }
+
+    $locations = @(Get-GSVDeepScanLocations -Roots $roots -MaxDepth $MaxDepth `
+        -MaxResults $MaxResults -NoSize:$NoSize -Progress $progress)
+
+    $saved = Update-GSVScanDatabase -Roots $roots -Locations $locations
+
+    Write-Host ''
+    Write-Kv 'Folders scanned' $roots.Count
+    Write-Kv 'Save locations' $locations.Count
+    Write-Kv 'Scan database' $saved.Path 'Green'
+    Write-Kv 'Stored total' $saved.Total
+
+    if ($locations.Count -eq 0) {
+        Write-Host '  No save folders found in those folders.' -ForegroundColor Yellow
+        return
+    }
+
+    $rows = foreach ($l in ($locations | Sort-Object GameName, ResolvedPath)) {
+        [pscustomobject]@{
+            Game   = $l.GameName
+            AppId  = $l.AppId
+            Path   = $l.ResolvedPath
+        }
+    }
+    $rows | Format-Table -AutoSize -Wrap | Out-String -Width 220 | Write-Host
+    Write-Host '  Back up the stored results:  .\GameSaveVault.ps1 backup -All' -ForegroundColor DarkGray
+}
+
+function Invoke-ExportDatabase {
+    Write-Title 'Export a portable game-save database'
+
+    $out = $File
+    if (-not $out) {
+        $out = Join-Path $vault ('GameSaveVault-{0}.gsvdb' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    }
+
+    $snaps = @(Get-GSVSnapshots -BackupRoot $vault)
+    $snapArg = $Snapshot
+    if ($snaps.Count -eq 0) {
+        $locs = @(Get-GSVScanDatabaseLocations -OnlyExisting)
+        if ($locs.Count -eq 0) {
+            throw 'No snapshots and no stored save locations. Run scan-folders and backup first.'
+        }
+        if ($isDryRun) {
+            Write-Host ("  DRY RUN - would snapshot {0} save location(s) and write {1}" -f $locs.Count, $out) -ForegroundColor Yellow
+            return
+        }
+        Write-Host '  No snapshot yet - creating one from the scan database...' -ForegroundColor DarkGray
+        $snap = New-GSVSnapshot -Locations $locs -BackupRoot $vault -Label 'portable-db' -HashFiles:$Hash -LogFile $logFile
+        $snapArg = $snap.SnapshotPath
+    }
+
+    if ($isDryRun) {
+        Write-Host ("  DRY RUN - would write portable database: {0}" -f $out) -ForegroundColor Yellow
+        return
+    }
+
+    $r = New-GSVPortableDatabase -BackupRoot $vault -Snapshot $snapArg -OutputPath $out -IncludeScanDatabase -Force -LogFile $logFile
+
+    Write-Host ''
+    Write-Kv 'Portable database' $r.Path 'Green'
+    Write-Kv 'Size' (Format-GSVSize $r.Bytes)
+    Write-Kv 'Snapshot' $r.SnapshotName
+    Write-Kv 'Entries' $r.EntryCount
+    Write-Kv 'Files' $r.TotalFiles
+    Write-Host '  Copy this one file to the new PC, then run:' -ForegroundColor DarkGray
+    Write-Host ('    .\GameSaveVault.ps1 restore-db -File "{0}"' -f $r.Path) -ForegroundColor DarkGray
+}
+
+function Invoke-RestoreFromFile {
+    Write-Title 'Restore saves from a portable database file'
+    if (-not $File) { throw 'Usage: .\GameSaveVault.ps1 restore-db -File D:\GameSaveVault-....gsvdb' }
+    if (-not (Test-Path -LiteralPath $File)) { throw "File not found: $File" }
+
+    $ext = [System.IO.Path]::GetExtension($File).ToLowerInvariant()
+    if ($ext -eq '.json') {
+        if ($isDryRun) {
+            Write-Host ("  DRY RUN - would import scan database {0}" -f $File) -ForegroundColor Yellow
+            return
+        }
+        $import = Import-GSVScanDatabaseFile -Path $File
+        Write-Kv 'Imported locations' $import.Imported
+        Write-Kv 'Stored total' $import.Total
+        Write-Kv 'Scan database' $import.Path 'Green'
+        Write-Host '  This JSON file lists where saves belong. Use a .gsvdb file to restore the save files too.' -ForegroundColor DarkYellow
+        return
+    }
+
+    $fmt = if ($RestoreFormat) { $RestoreFormat.ToLowerInvariant() } else { 'profile' }
+    if ($fmt -notin @('profile', 'verbatim', 'folder')) {
+        throw "Unknown -RestoreFormat '$RestoreFormat'. Use profile, verbatim or folder."
+    }
+    if ($fmt -eq 'folder' -and -not $RestoreRoot) {
+        throw '-RestoreRoot is required with -RestoreFormat folder.'
+    }
+
+    if (-not $Quiet) {
+        Write-Kv 'Portable database' $File 'Yellow'
+        Write-Kv 'Restore format' $fmt
+        if ($RestoreRoot) { Write-Kv 'Into folder' $RestoreRoot 'Yellow' }
+        if ($isDryRun) { Write-Host '  DRY RUN - nothing will be changed.' -ForegroundColor Yellow }
+    }
+
+    $r = Restore-GSVPortableDatabase -BundlePath $File -BackupRoot $vault `
+        -RestoreFormat $fmt -RestoreRoot $RestoreRoot -GameFilter $Game `
+        -DryRun:$isDryRun -SkipRegistry:$SkipRegistry -KeepExisting:$KeepExisting -LogFile $logFile
+
+    Write-Host ''
+    Write-Kv 'Imported scan db' $r.ImportedDatabase
+    Write-Kv 'Restored' $r.Restored
+    Write-Kv 'Registry keys' $r.Registry
+    Write-Kv 'Skipped' $r.Skipped
+    Write-Kv 'Failed' $r.Failed ($(if ($r.Failed -gt 0) { 'Red' } else { 'Gray' }))
+    foreach ($m in @($r.Messages)) { Write-Host "  - $m" -ForegroundColor DarkYellow }
+}
+
 function Invoke-Migrate {
     Write-Title 'Migrate console emulator saves'
 
@@ -734,6 +982,12 @@ USAGE
 
 COMMANDS
   scan                 List installed games and the save folders found (default)
+  roots                List the drives / folders you can choose to scan
+  scan-folders         Scan ONLY the folders you choose, and store the results
+                       in config\scan-database.json. -Directory, -Drive, -AllDrives
+  scan-db              Show the stored scan database (no scanning)
+  export-db            Write one portable .gsvdb file (save files + scan database)
+  restore-db           Restore saves on another PC from a portable .gsvdb file
   deep-scan            Search a whole drive or a folder for every save folder (CPY /
                        GSE / Goldberg / scene "remote" / UWP / Steam userdata /
                        LocalLow / emulator titles). -Drive, -Directory, -AllDrives
@@ -776,9 +1030,10 @@ COMMON OPTIONS
   -Backup              (deep-scan) snapshot everything the scan found
   -From / -To <emu>    (migrate) e.g. eden, ryujinx, eglantine, kyty, shadps4
   -Title <id>          (migrate) only this title id (e.g. 0100… or PPSA…)
-  -Directory <path>    (deep-scan) search specific folders, e.g. -Directory D:\Games
-  -RestoreFormat       (restore/from-old) profile (default) | verbatim | folder
-  -RestoreRoot <folder>    (restore/from-old) folder format: <folder>\<TOKEN>\<path>
+  -Directory <path>    (scan-folders/deep-scan) folders to search, e.g. D:\Games
+  -RestoreFormat       (restore/from-old/restore-db) profile (default) | verbatim | folder
+  -RestoreRoot <folder>    (restore/from-old/restore-db) folder format: <folder>\<TOKEN>\<path>
+  -File <path>         (rule-import/export) JSON rules file, or (export-db/restore-db) the .gsvdb file
   -SavePattern <glob>  (rule-add) which files are saves, e.g. *.sav,*.dat
   -Alias <name>        (rule-add) alternative game names for matching
   -InstallDir <name>   (rule-add) install folder name(s) used to find the game
@@ -788,6 +1043,12 @@ COMMON OPTIONS
   -Backup              (discover) snapshot everything the rules found
 
 EXAMPLES
+  .\GameSaveVault.ps1 roots
+  .\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"
+  .\GameSaveVault.ps1 scan-folders -AllDrives -MaxDepth 12
+  .\GameSaveVault.ps1 scan-db
+  .\GameSaveVault.ps1 export-db -File D:\GameSaveVault.gsvdb
+  .\GameSaveVault.ps1 restore-db -File D:\GameSaveVault.gsvdb
   .\GameSaveVault.ps1 deep-scan
   .\GameSaveVault.ps1 deep-scan -AllDrives -MaxDepth 12
   .\GameSaveVault.ps1 deep-scan -Drive C: -Backup
@@ -819,6 +1080,14 @@ try {
     switch ($cmd) {
         'scan'      { Show-Scan }
         'list'      { Show-Scan }
+        'roots'     { Show-ScanRoots }
+        'scan-roots' { Show-ScanRoots }
+        'scan-folders' { Invoke-ScanFolders }
+        'scan-dirs' { Invoke-ScanFolders }
+        'scan-db'   { Show-ScanDatabase }
+        'export-db' { Invoke-ExportDatabase }
+        'restore-db' { Invoke-RestoreFromFile }
+        'restore-file' { Invoke-RestoreFromFile }
         'backup'    { Invoke-Backup }
         'restore'   { Invoke-Restore }
         'from-old'  { Invoke-FromOld }

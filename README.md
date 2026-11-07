@@ -50,6 +50,8 @@ There are two ways to get them back:
 
 ```powershell
 cd "$env:LOCALAPPDATA\GameSaveVault"
+powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 roots
+powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 backup -All
 ```
 
@@ -60,6 +62,12 @@ After the new Windows is installed and the games are reinstalled:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 restore -Snapshot latest -DryRun
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 restore -Snapshot latest
+```
+
+If you moved the saves as one portable database file instead, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 restore-db -File D:\GameSaveVault.gsvdb
 ```
 
 `-DryRun` only prints what would happen. The real restore copies the saves back into the current profile. If a save already exists, it is moved to `G:\GameSaveVault\rollback\<timestamp>\` first, so nothing is lost.
@@ -91,18 +99,25 @@ Requirements: Windows 10/11, Windows PowerShell 5.1 (built in). No admin rights 
 ```powershell
 cd "$env:LOCALAPPDATA\GameSaveVault"
 
-# 1. see what it finds
-powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 scan
+# 1. list the drives / folders you can choose from (nothing is scanned yet)
+powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 roots
 
-# 2. see every path for every game
-powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 scan -Detailed
+# 2. scan ONLY the folders you choose, and store the results in the database
+powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"
 
-# 3. back everything up
+# 3. see what was stored (loads the database, does not scan again)
+powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 scan-db
+
+# 4. back everything up
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 backup -All
 
-# 4. list snapshots
+# 5. list snapshots
 powershell -ExecutionPolicy Bypass -File .\GameSaveVault.ps1 snapshots
 ```
+
+`scan` (the old catalog scan) is still available, but the normal flow is now
+**choose folders → scan them → store the results**. The GUI does the same thing
+with checkboxes.
 
 ### GUI
 
@@ -116,7 +131,59 @@ Or run `Install.ps1` once to create a desktop / Start-menu shortcut:
 powershell -ExecutionPolicy Bypass -File .\Install.ps1
 ```
 
-The GUI shows every detected game with a checkbox, the save folders it found, and buttons for **Backup selected**, **Backup all**, **Restore…**, **Windows.old…**, **Deep scan…**, **Migrate…**, **Add game…**, **Save rules…**, **Open vault**, **Backup location…** and **Doctor**. Double-click a row to open its save folder.
+The first time you open the GUI it does **not** scan. It lists the drives and common game/save folders it can see, and you tick the ones you want. GameSaveVault then scans only those folders and their subfolders and stores the results in `config\scan-database.json`. On later starts it loads that database instantly. Use **Scan folders…** to change the selection and **Rescan** to refresh the same folders.
+
+The GUI shows every stored game with a checkbox, the save folders it found, and buttons for **Scan folders…**, **Rescan**, **Backup selected**, **Backup all**, **Restore…**, **Restore file…**, **Export DB…**, **Windows.old…**, **Deep scan…**, **Migrate…**, **Add game…**, **Save rules…**, **Open vault**, **Backup location…** and **Doctor**. Double-click a row to open its save folder.
+
+**Export DB…** writes one portable `.gsvdb` file that contains the save files plus the scan database. Copy that single file to another PC, click **Restore file…** there, and the saves are restored into that PC's profile (or a folder you choose).
+
+#### First run: choose folders, then scan
+
+Nothing is scanned automatically. The first-run window lists:
+
+- every ready drive (`C:\`, `D:\`, …)
+- common game folders (`Games`, `SteamLibrary`, `GOG Games`, `PS5GAMES`, …)
+- launcher libraries (Steam, Epic, GOG, EA, Ubisoft, …)
+- save roots (`Documents`, `Saved Games`, `LocalLow`, `Public Documents`, …)
+
+Tick what you want and click **Scan selected**. The scan walks those folders and
+their subfolders, then writes the findings to `config\scan-database.json`:
+
+```json
+{
+  "Version": 1,
+  "Roots": [ { "Path": "D:\\Games", "LocationCount": 42 } ],
+  "Locations": [
+    {
+      "GameName": "Example Game",
+      "Token": "DOCUMENTS",
+      "RelativePath": "Example Game\\Saves",
+      "ResolvedPath": "D:\\Games\\Example Game\\Saves",
+      "Kind": "Directory"
+    }
+  ]
+}
+```
+
+The database is a normal JSON file. You can copy it to another PC and import it
+with **Restore file…** (or `restore-db -File ...`). A plain JSON database only
+lists *where* saves belong; the portable `.gsvdb` file below also carries the
+save contents.
+
+#### Restore on another PC from one database file
+
+1. On the old PC, click **Export DB…** (or run `export-db`). This creates one
+   `GameSaveVault-<date>.gsvdb` file containing the snapshot payload and the scan
+   database. It is a zip archive with a friendly extension.
+2. Copy that file to the new PC with a USB stick, network share or cloud drive.
+3. On the new PC, install GameSaveVault, click **Restore file…**, and select the
+   `.gsvdb` file. Choose `profile` (new Windows user), `verbatim` (old absolute
+   layout) or `folder` (one folder).
+4. The embedded scan database is imported automatically, so the game list is
+   ready on the new PC as well.
+
+Existing saves are moved to `vault\rollback\<timestamp>` before anything is
+overwritten, exactly like a normal restore.
 
 #### Choosing where backups are stored
 
@@ -144,9 +211,14 @@ powershell -ExecutionPolicy Bypass -File .\Install.ps1 -ScheduledTask -Time 21:3
 | Command | What it does |
 |---|---|
 | `scan` | Detect installed games and the save folders found (default). `-Detailed` prints every path. |
+| `roots` | List the drives / folders available for selection. Nothing is scanned. |
+| `scan-folders` | Scan **only** the chosen folders and store the results in `config\scan-database.json`. `-Directory "D:\Games;C:\PS5GAMES"`, `-Drive D:`, `-AllDrives`, `-MaxDepth`, `-MaxResults`, `-NoSize`. |
+| `scan-db` | Show the stored scan database without scanning. |
+| `export-db` | Write one portable `.gsvdb` file (snapshot payload + scan database). `-File <path>`, `-Snapshot <name>`. |
+| `restore-db` | Restore saves on another PC from a `.gsvdb` file. `-File <path>`, `-RestoreFormat`, `-RestoreRoot`, `-Game`, `-DryRun`. |
 | `deep-scan` | Search a whole drive for save folders the normal scan may miss (aliases: `deepscan`, `deep`, `search`). `-Drive C:`, `-AllDrives`, `-MaxDepth 12`, `-MaxResults 500`, `-NoSize`, `-Backup`. |
 | `migrate` | Copy console-emulator saves between emulators: `-From <source> -To <target>`, `-Title <id>`, `-DryRun`. |
-| `backup` | Snapshot saves into the vault. `-All` includes launcher-wide/emulator folders. `-Game Skyrim,Palworld` limits it. |
+| `backup` | Snapshot saves into the vault. With no `-Game` filter it uses the stored scan database (and falls back to the catalog when the database is empty). `-All` also includes launcher-wide/emulator folders. `-Game Skyrim,Palworld` limits it. |
 | `restore` | Restore the latest or a named snapshot. `-DryRun`, `-Game`, `-KeepExisting`, `-SkipRegistry`. |
 | `from-old` | Import + restore saves from `C:\Windows.old`. `-DryRun`, `-NoRestore`, `-WindowsOldRoot`. |
 | `snapshots` | List snapshots with date, size, file count and errors. |
@@ -172,24 +244,42 @@ Common switches:
 -KeepExisting                    # never overwrite a save that exists
 -NoGlobal                        # skip launcher-wide / crack / emulator folders
 -Keep 8                          # how many snapshots to keep
--Drive C: -AllDrives             # deep-scan only: which drive(s) to search
--MaxDepth 12 -MaxResults 500     # deep-scan only: folder depth and hit limit
--NoSize                         # deep-scan only: skip file counting (much faster)
+-Drive C: -AllDrives             # scan-folders / deep-scan: which drive(s) to search
+-Directory "D:\Games;C:\PS5GAMES"  # scan-folders / deep-scan: specific folders
+-MaxDepth 12 -MaxResults 500     # scan-folders / deep-scan: folder depth and hit limit
+-NoSize                         # scan-folders / deep-scan: skip file counting (much faster)
 -Backup                         # deep-scan / discover: snapshot everything found
 -From / -To <emu>               # migrate only: source and target emulator
 -Title <id>                     # migrate only: one title id
--RestoreFormat profile|verbatim|folder   # restore layout (default: profile)
+-RestoreFormat profile|verbatim|folder   # restore / restore-db layout (default: profile)
 -RestoreRoot <folder>           # folder format: <folder>\<TOKEN>\<relative path>
 -SavePattern *.sav,*.dat        # rule-add: which files are saves
 -InstallDir "My Game"           # rule-add: install folder name(s) used to find the game
 -Mode auto|token|gamedir|absolute        # rule-add: restore strategy
 -Alias "Alternative name"       # rule-add: extra name for game matching
--File rules.json                # rule-import / rule-export
+-File rules.json                # rule-import / rule-export (JSON rules)
+-File D:\GameSaveVault.gsvdb    # export-db / restore-db (portable database)
 ```
 
 Examples:
 
 ```powershell
+# list folders you can choose from (nothing is scanned)
+.\GameSaveVault.ps1 roots
+
+# scan only two game folders and store the results
+.\GameSaveVault.ps1 scan-folders -Directory "D:\Games;C:\PS5GAMES"
+
+# scan every fixed drive and store the results
+.\GameSaveVault.ps1 scan-folders -AllDrives -MaxDepth 12
+
+# show the stored database without scanning again
+.\GameSaveVault.ps1 scan-db
+
+# export one portable database file, then restore it on another PC
+.\GameSaveVault.ps1 export-db -File D:\GameSaveVault.gsvdb
+.\GameSaveVault.ps1 restore-db -File D:\GameSaveVault.gsvdb -RestoreFormat profile
+
 # search the whole C: drive for save folders (crack, Steam-emulator, UWP, LocalLow)
 .\GameSaveVault.ps1 deep-scan -Drive C: -NoSize
 
@@ -317,6 +407,18 @@ Denuvo is anti-tamper DRM, **not** a save system. It does not store your progres
 ---
 
 ## How discovery works
+
+The app does not scan the whole PC on startup. On first run it lists the drives
+and common game/save folders it can see; you tick the ones to search. Those
+folders and their subfolders are walked once, and every save location found is
+stored in `config\scan-database.json`. Later starts load that database without
+scanning. **Scan folders…** changes the selection, **Rescan** refreshes it, and
+**Deep scan…** searches a whole drive without touching the selection.
+
+The database stores the same location objects used by backup/restore, so the
+list, checkboxes and backup buttons work exactly as before. It also records the
+path tokens (`%DOCUMENTS%`, `%APPDATA%`, `%GAMEDIR%`, …) needed to restore on a
+different Windows user or drive letter.
 
 For every installed game the tool combines:
 
@@ -526,8 +628,10 @@ GameSaveVault\
     GSV.Vault.psm1               snapshot, restore, rollback, pruning
   data\catalog.psd1              96 curated games and save paths
   data\save-rules.schema.json    JSON Schema for config\save-rules.json
+  data\scan-database.schema.json JSON Schema for config\scan-database.json
   config\settings.json           generated on first run (git-ignored)
   config\settings.example.json   sample settings
+  config\scan-database.json      folders you chose + save locations found (git-ignored)
   config\save-rules.json         your save rules (generated / editable)
   config\save-rules.example.json seeded example rules
   config\games.custom.json       generated when you add games
@@ -539,6 +643,7 @@ GameSaveVault\
     selftest-emulators.ps1       console-emulator scan + migrate
     selftest-formats.ps1         profile / verbatim / folder restore formats
     selftest-rules.ps1           tokenize -> save -> discover -> new-PC restore -> import/export
+    selftest-scandb.ps1          choose folders -> scan database -> portable .gsvdb restore
   .gitignore
   LICENSE
 ```
@@ -548,5 +653,6 @@ GameSaveVault\
 ## Notes
 
 - Works with **any games**, including **crack games and emulators**. Use it with games you own. The tool only copies save data; it does not provide game files, cracks or DRM bypasses.
-- The first scan can take a few seconds because it walks `AppData`, `LocalLow` and `Documents`. Later runs are similar; there is no background service.
+- Nothing is scanned until you choose folders. The first scan can take a few seconds because it walks the selected folders, `AppData`, `LocalLow` and `Documents` when those are ticked; later starts load `config\scan-database.json` instantly.
 - Backups are plain files — you can open the vault in Explorer and copy it to another disk or cloud drive yourself.
+- A portable `.gsvdb` file is just a zip containing `manifest.json`, the save payload and `scan-database.json`. You can inspect it with any zip tool.

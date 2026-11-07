@@ -327,10 +327,19 @@ function Resolve-GSVSnapshot {
     if (Test-Path -LiteralPath $Snapshot) {
         $p = (Get-Item -LiteralPath $Snapshot).FullName
         if (Test-Path -LiteralPath (Join-Path $p 'manifest.json')) {
+            $m = Read-GSVJson -Path (Join-Path $p 'manifest.json')
             return [pscustomobject]@{
-                Path = $p; Name = (Split-Path -Leaf $p); CreatedUtc = ''; Label = '';
-                EntryCount = 0; TotalFiles = 0; TotalBytes = 0; Machine = ''; User = ''; Errors = 0;
-                Manifest = (Read-GSVJson -Path (Join-Path $p 'manifest.json'))
+                Path       = $p
+                Name       = (Split-Path -Leaf $p)
+                CreatedUtc = if ($m -and $m.CreatedUtc) { [string]$m.CreatedUtc } else { '' }
+                Label      = if ($m) { [string]$m.Label } else { '' }
+                EntryCount = if ($m) { [int]$m.EntryCount } else { 0 }
+                TotalFiles = if ($m) { [int]$m.TotalFiles } else { 0 }
+                TotalBytes = if ($m) { [int64]$m.TotalBytes } else { [int64]0 }
+                Machine    = if ($m) { [string]$m.Machine } else { '' }
+                User       = if ($m) { [string]$m.User } else { '' }
+                Errors     = if ($m) { @($m.Errors).Count } else { 0 }
+                Manifest   = $m
             }
         }
     }
@@ -894,6 +903,200 @@ function Copy-GSVEmulatorSaves {
     return [pscustomobject]@{
         Migrated = $migrated; Skipped = $skipped; Failed = $failed
         Messages = $messages.ToArray(); Destination = $DestinationEmulatorId
+    }
+}
+
+#endregion
+
+#region ---------------------------------------------------------------- portable database
+
+function New-GSVPortableDatabase {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string]$Snapshot = 'latest',
+        [Parameter(Mandatory)][string]$OutputPath,
+        [switch]$IncludeScanDatabase,
+        [switch]$Force,
+        [string]$LogFile
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+
+    $snap = Resolve-GSVSnapshot -BackupRoot $BackupRoot -Snapshot $Snapshot
+    if (-not $snap -or -not $snap.Manifest) { throw "Snapshot '$Snapshot' has no readable manifest.json." }
+
+    if (-not $OutputPath) { throw 'OutputPath is required.' }
+    if ([System.IO.Path]::GetExtension($OutputPath) -eq '') { $OutputPath += '.gsvdb' }
+    $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+
+    if ((Test-Path -LiteralPath $OutputPath) -and -not $Force) {
+        throw "Output file already exists: $OutputPath (use -Force to overwrite)"
+    }
+    $outDir = Split-Path -Parent $OutputPath
+    if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    }
+
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('gsv-bundle-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+    try {
+        $manifestSource = Join-Path $snap.Path 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestSource)) { throw "Snapshot manifest missing: $manifestSource" }
+        Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $stage 'manifest.json') -Force
+
+        $payloadSource = Join-Path $snap.Path 'payload'
+        if (Test-Path -LiteralPath $payloadSource) {
+            Invoke-GSVCopyTree -Source $payloadSource -Destination (Join-Path $stage 'payload')
+        }
+
+        $includedDb = $false
+        if ($IncludeScanDatabase) {
+            $dbPath = Get-GSVScanDatabasePath
+            if ($dbPath -and (Test-Path -LiteralPath $dbPath)) {
+                Copy-Item -LiteralPath $dbPath -Destination (Join-Path $stage 'scan-database.json') -Force
+                $includedDb = $true
+            }
+        }
+
+        $bundleInfo = [pscustomobject]([ordered]@{
+            Version       = 1
+            Tool          = 'GameSaveVault'
+            ToolVersion   = $script:GSVVersion
+            CreatedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+            SnapshotName  = $snap.Name
+            SnapshotLabel = [string]$snap.Label
+            Machine       = $env:COMPUTERNAME
+            User          = $env:USERNAME
+            EntryCount    = [int]$snap.EntryCount
+            TotalFiles    = [int]$snap.TotalFiles
+            TotalBytes    = [int64]$snap.TotalBytes
+            ScanDatabase  = $includedDb
+        })
+        Write-GSVTextFile -Path (Join-Path $stage 'bundle.json') -Text ($bundleInfo | ConvertTo-Json -Depth 6)
+
+        if ((Test-Path -LiteralPath $OutputPath) -and $Force) {
+            Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
+        }
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $stage, $OutputPath,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false)
+
+        $fi = Get-Item -LiteralPath $OutputPath
+        Write-GSVLog -Level Success -Message ("portable database: {0} ({1})" -f $OutputPath, (Format-GSVSize $fi.Length)) -LogFile $LogFile
+
+        return [pscustomobject]@{
+            Path         = $OutputPath
+            Bytes        = [int64]$fi.Length
+            SnapshotPath = $snap.Path
+            SnapshotName = $snap.Name
+            EntryCount   = [int]$snap.EntryCount
+            TotalFiles   = [int]$snap.TotalFiles
+            ScanDatabase = $includedDb
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stage) {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-GSVPortableDatabaseInfo {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Portable database not found: $Path" }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = $null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+
+        $readEntry = {
+            param($name)
+            $entry = $zip.Entries | Where-Object { $_.FullName -ieq $name } | Select-Object -First 1
+            if (-not $entry) { return $null }
+            $reader = New-Object System.IO.StreamReader($entry.Open())
+            try { return ($reader.ReadToEnd() | ConvertFrom-Json) } finally { $reader.Dispose() }
+        }
+
+        $manifest = & $readEntry 'manifest.json'
+        if (-not $manifest) { throw "Not a GameSaveVault portable database (manifest.json missing): $Path" }
+        $bundle = & $readEntry 'bundle.json'
+
+        return [pscustomobject]@{
+            Path         = (Get-Item -LiteralPath $Path).FullName
+            Bytes        = [int64](Get-Item -LiteralPath $Path).Length
+            Manifest     = $manifest
+            Bundle       = $bundle
+            SnapshotName = if ($bundle) { [string]$bundle.SnapshotName } else { '' }
+            Machine      = if ($bundle) { [string]$bundle.Machine } else { [string]$manifest.Machine }
+            EntryCount   = [int]$manifest.EntryCount
+            TotalFiles   = [int]$manifest.TotalFiles
+            TotalBytes   = [int64]$manifest.TotalBytes
+            HasScanDb    = [bool](@($zip.Entries | Where-Object { $_.FullName -ieq 'scan-database.json' }).Count -gt 0)
+        }
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+}
+
+function Restore-GSVPortableDatabase {
+    param(
+        [Parameter(Mandatory)][string]$BundlePath,
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [string]$RestoreFormat = 'profile',
+        [string]$RestoreRoot = '',
+        [string[]]$GameFilter = @(),
+        [switch]$DryRun,
+        [switch]$SkipRegistry,
+        [switch]$KeepExisting,
+        [switch]$NoScanDatabaseImport,
+        [string]$LogFile
+    )
+
+    if (-not (Test-Path -LiteralPath $BundlePath)) { throw "Portable database not found: $BundlePath" }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ('gsv-restore-' + [guid]::NewGuid().ToString('N'))
+    $importedDb = $false
+
+    try {
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($BundlePath, $tempDir)
+
+        $manifestPath = Join-Path $tempDir 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestPath)) {
+            throw "Not a GameSaveVault portable database (manifest.json missing): $BundlePath"
+        }
+
+        $dbPath = Join-Path $tempDir 'scan-database.json'
+        if (-not $DryRun -and -not $NoScanDatabaseImport -and (Test-Path -LiteralPath $dbPath)) {
+            $null = Import-GSVScanDatabaseFile -Path $dbPath
+            $importedDb = $true
+        }
+
+        if (-not $DryRun -and -not (Test-Path -LiteralPath $BackupRoot)) {
+            New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+        }
+
+        $result = Restore-GSVSnapshot -BackupRoot $BackupRoot -Snapshot $tempDir `
+            -GameFilter $GameFilter -DryRun:$DryRun -SkipRegistry:$SkipRegistry `
+            -KeepExisting:$KeepExisting -RestoreFormat $RestoreFormat -RestoreRoot $RestoreRoot `
+            -LogFile $LogFile
+
+        return [pscustomobject]@{
+            BundlePath        = (Get-Item -LiteralPath $BundlePath).FullName
+            ImportedDatabase  = $importedDb
+            Restore           = $result
+            Restored          = $result.Restored
+            Registry          = $result.Registry
+            Skipped           = $result.Skipped
+            Failed            = $result.Failed
+            Messages          = $result.Messages
+        }
+    } finally {
+        if (Test-Path -LiteralPath $tempDir) {
+            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
