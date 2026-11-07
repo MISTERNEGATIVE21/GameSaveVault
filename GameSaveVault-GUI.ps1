@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
     GameSaveVault-GUI.ps1
     WinForms front-end for GameSaveVault.
@@ -14,6 +14,12 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
+# Make the app DPI-aware so it stays crisp on high-DPI displays.
+try {
+    Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -Name DpiAware -Namespace GSV -ErrorAction Stop
+    [GSV.DpiAware]::SetProcessDPIAware() | Out-Null
+} catch { }
+
 $ErrorActionPreference = 'Stop'
 $script:Root = $PSScriptRoot
 
@@ -28,6 +34,22 @@ $script:Vault = $script:Settings.BackupRoot
 $script:Games = @()
 $script:Global = @()
 $script:Emulators = @()
+$script:AllGames = @()
+$script:GameFilter = ''
+$script:SortColumn = 0
+$script:SortAsc = $true
+
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class GsvNative {
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, string lParam);
+    public static void SetCue(IntPtr h, string text) { SendMessage(h, 0x1501, (IntPtr)1, text); }
+}
+"@ -ErrorAction Stop
+} catch { }
 
 #region ---------------------------------------------------------------- tiny dialogs
 
@@ -1092,89 +1114,627 @@ function Show-RulesDialog {
     $dlg.Dispose()
 }
 
+#region ---------------------------------------------------------------- helpers (polished UI)
+
+$script:ColorBg        = [System.Drawing.ColorTranslator]::FromHtml('#F3F5F9')
+$script:ColorSurface   = [System.Drawing.Color]::White
+$script:ColorBorder    = [System.Drawing.ColorTranslator]::FromHtml('#E2E8F0')
+$script:ColorText      = [System.Drawing.ColorTranslator]::FromHtml('#0F172A')
+$script:ColorMuted     = [System.Drawing.ColorTranslator]::FromHtml('#64748B')
+$script:ColorAccent    = [System.Drawing.ColorTranslator]::FromHtml('#2563EB')
+$script:ColorAccentDk  = [System.Drawing.ColorTranslator]::FromHtml('#1D4ED8')
+$script:ColorSuccess   = [System.Drawing.ColorTranslator]::FromHtml('#059669')
+$script:ColorSuccessDk = [System.Drawing.ColorTranslator]::FromHtml('#047857')
+$script:ColorHeaderBg  = [System.Drawing.ColorTranslator]::FromHtml('#0F172A')
+$script:ColorHeaderFg  = [System.Drawing.Color]::White
+$script:ColorHeaderSub = [System.Drawing.ColorTranslator]::FromHtml('#94A3B8')
+
+$script:AppFont        = New-Object System.Drawing.Font('Segoe UI', 9)
+$script:AppFontBold    = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+$script:AppFontSmall   = New-Object System.Drawing.Font('Segoe UI', 8)
+$script:AppFontStat    = New-Object System.Drawing.Font('Segoe UI Semibold', 15)
+$script:Tip            = New-Object System.Windows.Forms.ToolTip
+$script:Tip.AutoPopDelay = 10000
+$script:Tip.InitialDelay = 400
+
+$script:GameFilter    = ''
+$script:SortColumn   = 0
+$script:SortAsc      = $true
+$script:AllGames     = @()
+$script:statGamesVal = $null
+$script:statLocsVal  = $null
+$script:statSizeVal  = $null
+$script:statSelVal   = $null
+
+function New-AppIcon {
+    $bmp = New-Object System.Drawing.Bitmap(32, 32, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $brush = New-Object System.Drawing.SolidBrush($script:ColorAccent)
+    $g.FillRectangle($brush, 2, 2, 28, 28)
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 3)
+    $g.DrawLine($pen, 9, 12, 16, 19)
+    $g.DrawLine($pen, 16, 19, 23, 12)
+    $g.DrawLine($pen, 16, 19, 16, 7)
+    $pen2 = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 3)
+    $g.DrawLine($pen2, 8, 24, 24, 24)
+    $g.Dispose(); $brush.Dispose(); $pen.Dispose(); $pen2.Dispose()
+    return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+function Set-GuiBusy {
+    param([bool]$Busy, [string]$Text)
+    if ($Text) { $statusLabel.Text = $Text }
+    if ($Busy) {
+        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $progressBar.Visible = $true
+        $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+        $progressBar.MarqueeAnimationSpeed = 30
+    } else {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        $progressBar.Visible = $false
+        $progressBar.MarqueeAnimationSpeed = 0
+    }
+    $form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Style-Button {
+    param($Button, [string]$Style = 'secondary', [int]$Height = 34)
+    $Button.Height = $Height
+    $Button.Font = $script:AppFontBold
+    $Button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $Button.UseVisualStyleBackColor = $false
+    $Button.Margin = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+    switch ($Style) {
+        'primary' {
+            $Button.BackColor = $script:ColorAccent
+            $Button.ForeColor = [System.Drawing.Color]::White
+            $Button.FlatAppearance.BorderSize = 0
+            $Button.FlatAppearance.MouseOverBackColor = $script:ColorAccentDk
+            $Button.FlatAppearance.MouseDownBackColor = $script:ColorAccentDk
+        }
+        'success' {
+            $Button.BackColor = $script:ColorSuccess
+            $Button.ForeColor = [System.Drawing.Color]::White
+            $Button.FlatAppearance.BorderSize = 0
+            $Button.FlatAppearance.MouseOverBackColor = $script:ColorSuccessDk
+            $Button.FlatAppearance.MouseDownBackColor = $script:ColorSuccessDk
+        }
+        'ghost' {
+            $Button.BackColor = [System.Drawing.Color]::Transparent
+            $Button.ForeColor = [System.Drawing.Color]::White
+            $Button.FlatAppearance.BorderSize = 0
+            $Button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(40,255,255,255)
+            $Button.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(60,255,255,255)
+        }
+        default {
+            $Button.BackColor = $script:ColorSurface
+            $Button.ForeColor = $script:ColorText
+            $Button.FlatAppearance.BorderSize = 1
+            $Button.FlatAppearance.BorderColor = $script:ColorBorder
+            $Button.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml('#F1F5F9')
+            $Button.FlatAppearance.MouseDownBackColor = $script:ColorBorder
+        }
+    }
+}
+
+function New-StatCard {
+    param([string]$Caption, [ref]$ValueVar)
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Dock = 'Fill'
+    $p.BackColor = $script:ColorSurface
+    $p.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $p.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
+    $cap = New-Object System.Windows.Forms.Label
+    $cap.Text = $Caption.ToUpper()
+    $cap.Font = $script:AppFontSmall
+    $cap.ForeColor = $script:ColorMuted
+    $cap.AutoSize = $true
+    $cap.Location = New-Object System.Drawing.Point(12, 8)
+    $val = New-Object System.Windows.Forms.Label
+    $val.Text = '0'
+    $val.Font = $script:AppFontStat
+    $val.ForeColor = $script:ColorText
+    $val.AutoSize = $true
+    $val.Location = New-Object System.Drawing.Point(10, 26)
+    $p.Controls.Add($cap)
+    $p.Controls.Add($val)
+    $ValueVar.Value = $val
+    return $p
+}
+
+function Update-GuiStats {
+    $games = @($script:AllGames)
+    $locs = 0
+    $bytes = [int64]0
+    foreach ($g in $games) {
+        $locs += @($g.Locations).Count
+        if ($g.Bytes) { $bytes += [int64]$g.Bytes }
+    }
+    $checked = @($games | Where-Object { $_.Checked }).Count
+    $script:statGamesVal.Text = [string]$games.Count
+    $script:statLocsVal.Text = [string]$locs
+    $script:statSizeVal.Text = (Format-GSVSize $bytes)
+    $script:statSelVal.Text = [string]$checked
+    if ($btnBackup) { $btnBackup.Enabled = ($checked -gt 0) }
+}
+
+function Update-GameList {
+    if (-not $list) { return }
+    $games = @($script:AllGames)
+    if ($script:GameFilter) {
+        $games = @($games | Where-Object {
+            ([string]$_.Name -like "*$($script:GameFilter)*") -or
+            ([string]$_.Source -like "*$($script:GameFilter)*") -or
+            ([string]$_.AppId -like "*$($script:GameFilter)*") -or
+            ([string]$_.Preview -like "*$($script:GameFilter)*")
+        })
+    }
+
+    switch ($script:SortColumn) {
+        1 { $games = @($games | Sort-Object Source, Name) }
+        2 { $games = @($games | Sort-Object { @($_.Locations).Count }, Name) }
+        3 { $games = @($games | Sort-Object Bytes, Name) }
+        4 { $games = @($games | Sort-Object Preview, Name) }
+        default { $games = @($games | Sort-Object Name) }
+    }
+    if (-not $script:SortAsc) { [array]::Reverse($games) }
+
+    $list.BeginUpdate()
+    $list.Items.Clear()
+    $i = 0
+    foreach ($g in $games) {
+        $item = New-Object System.Windows.Forms.ListViewItem([string]$g.Name)
+        [void]$item.SubItems.Add([string]$g.Source)
+        [void]$item.SubItems.Add([string]@($g.Locations).Count)
+        [void]$item.SubItems.Add((Format-GSVSize ([int64](0 + $g.Bytes))))
+        [void]$item.SubItems.Add([string]$g.Preview)
+        $item.Tag = $g
+        $item.Checked = [bool]$g.Checked
+        if ($g.Missing -eq 'all') { $item.ForeColor = $script:ColorMuted }
+        $item.BackColor = if ($i % 2 -eq 1) { [System.Drawing.ColorTranslator]::FromHtml('#F8FAFC') } else { $script:ColorSurface }
+        $item.ToolTipText = [string]$g.Preview
+        [void]$list.Items.Add($item)
+        $i++
+    }
+    $list.EndUpdate()
+
+    if ($emptyPanel) {
+        if ($list.Items.Count -eq 0) {
+            $emptyPanel.Visible = $true
+            $list.Visible = $false
+            if (@($script:AllGames).Count -eq 0) {
+                $emptyTitle.Text = 'No saves loaded yet'
+                $emptyText.Text = 'Choose the folders you want GameSaveVault to search. It only scans the folders you pick, and remembers the result.'
+                if ($emptyScanBtn) { $emptyScanBtn.Visible = $true }
+                if ($emptyClearBtn) { $emptyClearBtn.Visible = $false }
+            } else {
+                $emptyTitle.Text = 'No games match this filter'
+                $emptyText.Text = 'Try a different search term, or clear the filter.'
+                if ($emptyScanBtn) { $emptyScanBtn.Visible = $false }
+                if ($emptyClearBtn) { $emptyClearBtn.Visible = $true }
+            }
+        } else {
+            $emptyPanel.Visible = $false
+            $list.Visible = $true
+        }
+    }
+
+    Update-GuiStats
+}
+
+function Open-SelectedGameFolder {
+    if ($list.SelectedItems.Count -eq 0) { return }
+    $g = $list.SelectedItems[0].Tag
+    if (-not $g) { return }
+    $loc = @($g.Locations | Where-Object { $_.Kind -ne 'Registry' -and $_.ResolvedPath -and (Test-Path -LiteralPath $_.ResolvedPath) } | Select-Object -First 1)
+    if ($loc.Count -eq 0) { Show-Warn 'No existing save folder for this entry.'; return }
+    $target = if (Test-Path -LiteralPath $loc[0].ResolvedPath -PathType Leaf) { Split-Path -Parent $loc[0].ResolvedPath } else { $loc[0].ResolvedPath }
+    Start-Process explorer.exe -ArgumentList ('"' + $target + '"')
+}
+
 #endregion
 
 #endregion
 
 #region ---------------------------------------------------------------- form
+#region ---------------------------------------------------------------- form
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'GameSaveVault  -  game save backup & restore'
-$form.Size = New-Object System.Drawing.Size(1240, 720)
-$form.MinimumSize = New-Object System.Drawing.Size(1000, 560)
-$form.StartPosition = 'CenterScreen'
-$form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$form.Text = 'GameSaveVault - Game Save Backup & Restore'
+$form.Size = New-Object System.Drawing.Size(1280, 800)
+$form.MinimumSize = New-Object System.Drawing.Size(1040, 640)
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$form.Font = $script:AppFont
+$form.BackColor = $script:ColorBg
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+try { $form.Icon = New-AppIcon } catch { }
 
-$top = New-Object System.Windows.Forms.FlowLayoutPanel
-$top.Dock = 'Top'
-$top.Height = 84
-$top.Padding = New-Object System.Windows.Forms.Padding(8, 8, 8, 4)
-$top.WrapContents = $true
-$top.AutoSize = $false
+# Root table layout
+$root = New-Object System.Windows.Forms.TableLayoutPanel
+$root.Dock = 'Fill'
+$root.ColumnCount = 1
+$root.RowCount = 6
+$root.BackColor = $script:ColorBg
+$root.Padding = New-Object System.Windows.Forms.Padding(0)
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 64)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 56)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 96)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$root.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 
-function New-TopButton {
-    param([string]$Text, [int]$Width = 120, [string]$Tip = '')
-    $b = New-Object System.Windows.Forms.Button
-    $b.Text = $Text
-    $b.Width = $Width
-    $b.Height = 30
-    $b.Margin = New-Object System.Windows.Forms.Padding(0, 0, 6, 0)
-    $b.FlatStyle = 'System'
-    if ($Tip) {
-        $tt = New-Object System.Windows.Forms.ToolTip
-        $tt.SetToolTip($b, $Tip)
+# Header panel
+$header = New-Object System.Windows.Forms.Panel
+$header.Dock = 'Fill'
+$header.BackColor = $script:ColorHeaderBg
+$iconBox = New-Object System.Windows.Forms.PictureBox
+$iconBox.Size = New-Object System.Drawing.Size(36, 36)
+$iconBox.Location = New-Object System.Drawing.Point(18, 14)
+$iconBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+try { $iconBox.Image = (New-AppIcon).ToBitmap() } catch { }
+$header.Controls.Add($iconBox)
+$titleLbl = New-Object System.Windows.Forms.Label
+$titleLbl.Text = 'GameSaveVault'
+$titleLbl.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 16)
+$titleLbl.ForeColor = $script:ColorHeaderFg
+$titleLbl.AutoSize = $true
+$titleLbl.Location = New-Object System.Drawing.Point(62, 10)
+$header.Controls.Add($titleLbl)
+$subLbl = New-Object System.Windows.Forms.Label
+$subLbl.Text = 'Back up and restore your PC game saves'
+$subLbl.Font = $script:AppFont
+$subLbl.ForeColor = $script:ColorHeaderSub
+$subLbl.AutoSize = $true
+$subLbl.Location = New-Object System.Drawing.Point(64, 36)
+$header.Controls.Add($subLbl)
+$verLbl = New-Object System.Windows.Forms.Label
+$verLbl.Text = ('v{0}' -f (Get-GSVVersion))
+$verLbl.Font = $script:AppFontSmall
+$verLbl.ForeColor = $script:ColorHeaderSub
+$verLbl.AutoSize = $true
+$verLbl.Location = New-Object System.Drawing.Point(210, 38)
+$header.Controls.Add($verLbl)
+$headerActions = New-Object System.Windows.Forms.FlowLayoutPanel
+$headerActions.Dock = 'Right'
+$headerActions.FlowDirection = [System.Windows.Forms.FlowDirection]::RightToLeft
+$headerActions.WrapContents = $false
+$headerActions.AutoSize = $true
+$headerActions.Padding = New-Object System.Windows.Forms.Padding(0, 14, 14, 0)
+$header.Controls.Add($headerActions)
+
+# Menu strip
+$menu = New-Object System.Windows.Forms.MenuStrip
+$menu.BackColor = $script:ColorSurface
+$menu.RenderMode = [System.Windows.Forms.ToolStripRenderMode]::System
+$menu.Font = $script:AppFont
+$menu.Dock = 'Fill'
+
+function New-Menu {
+    param([string]$Text)
+    $m = New-Object System.Windows.Forms.ToolStripMenuItem $Text
+    [void]$menu.Items.Add($m)
+    return $m
+}
+function Add-MenuItem {
+    param($Parent, [string]$Text, $Button, [string]$Shortcut = '', [switch]$Separator)
+    if ($Separator) { [void]$Parent.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) ; return }
+    $mi = New-Object System.Windows.Forms.ToolStripMenuItem $Text
+    $mi.Tag = $Button
+    $mi.Add_Click({ if ($this.Tag) { $this.Tag.PerformClick() } })
+    if ($Shortcut) {
+        try {
+            $kc = New-Object System.Windows.Forms.KeysConverter
+            $mi.ShortcutKeys = [System.Windows.Forms.Keys]$kc.ConvertFromString($Shortcut)
+            $mi.ShowShortcutKeys = $true
+        } catch { }
     }
-    return $b
+    [void]$Parent.DropDownItems.Add($mi)
+    return $mi
 }
 
-$btnScan     = New-TopButton 'Scan folders...' 120 'Choose drives/folders to scan; results are stored in the scan database'
-$btnRescan   = New-TopButton 'Rescan' 80 'Re-scan the folders already stored in the scan database'
-$btnBackup   = New-TopButton 'Backup selected' 130 'Back up the checked games'
-$btnBackupAll = New-TopButton 'Backup all' 100 'Back up every detected game'
-$btnRestore  = New-TopButton 'Restore...' 100 'Restore a snapshot from this PC''s vault'
-$btnRestoreFile = New-TopButton 'Restore file...' 110 'Restore saves on another PC from a portable .gsvdb database file'
-$btnExportDb = New-TopButton 'Export DB...' 110 'Write one portable .gsvdb file containing saves + the scan database'
-$btnOld      = New-TopButton 'Windows.old...' 120 'Recover saves from C:\Windows.old'
-$btnDeep     = New-TopButton 'Deep scan...' 110 'Search a whole drive for CPY / GSE / scene / Steam / UWP saves'
-$btnMigrate  = New-TopButton 'Migrate...' 90 'Copy console-emulator saves between emulators of the same console'
-$btnAdd      = New-TopButton 'Add game...' 100 'Register a custom save folder'
-$btnRules    = New-TopButton 'Save rules...' 110 'Manage the portable save-location database (config\save-rules.json)'
-$btnVault    = New-TopButton 'Open vault' 100 'Open the backup folder'
-$btnVaultLoc = New-TopButton 'Backup location...' 150 'Choose where backups are stored (default vault folder)'
-$btnDoctor   = New-TopButton 'Doctor' 80 'Check vault health'
+$mFile = New-Menu 'File'
+$mScan = New-Menu 'Scan'
+$mEmu  = New-Menu 'Emulators'
+$mGames = New-Menu 'Games'
+$mHelp = New-Menu 'Help'
 
-$top.Controls.AddRange(@($btnScan, $btnRescan, $btnBackup, $btnBackupAll, $btnRestore, $btnRestoreFile, $btnExportDb, $btnOld, $btnDeep, $btnMigrate, $btnAdd, $btnRules, $btnVault, $btnVaultLoc, $btnDoctor))
+# Action bar
+$actions = New-Object System.Windows.Forms.Panel
+$actions.Dock = 'Fill'
+$actions.BackColor = $script:ColorSurface
+$actions.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 8)
+$actions.Add_Paint({
+    param($s,$e)
+    $pen = New-Object System.Drawing.Pen($script:ColorBorder)
+    $e.Graphics.DrawLine($pen, 0, $s.Height - 1, $s.Width, $s.Height - 1)
+    $pen.Dispose()
+})
+
+$actionGrid = New-Object System.Windows.Forms.TableLayoutPanel
+$actionGrid.Dock = 'Fill'
+$actionGrid.ColumnCount = 2
+$actionGrid.RowCount = 1
+$actionGrid.BackColor = $script:ColorSurface
+[void]$actionGrid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$actionGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$actionGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 320)))
+$actions.Controls.Add($actionGrid)
+
+$leftActions = New-Object System.Windows.Forms.FlowLayoutPanel
+$leftActions.Dock = 'Fill'
+$leftActions.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+$leftActions.WrapContents = $false
+$leftActions.AutoScroll = $false
+$leftActions.Padding = New-Object System.Windows.Forms.Padding(0)
+$actionGrid.Controls.Add($leftActions, 0, 0)
+
+$rightActions = New-Object System.Windows.Forms.FlowLayoutPanel
+$rightActions.Dock = 'Fill'
+$rightActions.FlowDirection = [System.Windows.Forms.FlowDirection]::RightToLeft
+$rightActions.WrapContents = $false
+$rightActions.Padding = New-Object System.Windows.Forms.Padding(0)
+$actionGrid.Controls.Add($rightActions, 1, 0)
+
+# Buttons
+$btnScan     = New-Object System.Windows.Forms.Button
+$btnScan.Text = 'Scan folders...'
+$btnRescan   = New-Object System.Windows.Forms.Button
+$btnRescan.Text = 'Rescan'
+$btnBackup   = New-Object System.Windows.Forms.Button
+$btnBackup.Text = 'Backup selected'
+$btnBackupAll = New-Object System.Windows.Forms.Button
+$btnBackupAll.Text = 'Backup all'
+$btnRestore  = New-Object System.Windows.Forms.Button
+$btnRestore.Text = 'Restore...'
+$btnRestoreFile = New-Object System.Windows.Forms.Button
+$btnRestoreFile.Text = 'Restore file...'
+$btnExportDb = New-Object System.Windows.Forms.Button
+$btnExportDb.Text = 'Export DB...'
+$btnOld      = New-Object System.Windows.Forms.Button
+$btnOld.Text = 'Windows.old...'
+$btnDeep     = New-Object System.Windows.Forms.Button
+$btnDeep.Text = 'Deep scan...'
+$btnMigrate  = New-Object System.Windows.Forms.Button
+$btnMigrate.Text = 'Migrate...'
+$btnAdd      = New-Object System.Windows.Forms.Button
+$btnAdd.Text = 'Add game...'
+$btnRules    = New-Object System.Windows.Forms.Button
+$btnRules.Text = 'Save rules...'
+$btnVault    = New-Object System.Windows.Forms.Button
+$btnVault.Text = 'Open vault'
+$btnVaultLoc = New-Object System.Windows.Forms.Button
+$btnVaultLoc.Text = 'Backup location...'
+$btnDoctor   = New-Object System.Windows.Forms.Button
+$btnDoctor.Text = 'Doctor'
+$btnSelectAll = New-Object System.Windows.Forms.Button
+$btnSelectAll.Text = 'Select all'
+$btnSelectNone = New-Object System.Windows.Forms.Button
+$btnSelectNone.Text = 'Clear'
+$btnClearFilter = New-Object System.Windows.Forms.Button
+$btnClearFilter.Text = 'x'
+
+foreach ($b in @($btnScan,$btnRescan,$btnBackup,$btnBackupAll,$btnRestore,$btnRestoreFile,$btnDeep,$btnVault,$btnVaultLoc)) {
+    $b.Width = 120; $b.Height = 34
+}
+$btnScan.Width = 132; $btnBackup.Width = 140; $btnRestoreFile.Width = 118; $btnVaultLoc.Width = 150
+Style-Button $btnScan 'primary'
+Style-Button $btnBackup 'success'
+foreach ($b in @($btnRescan,$btnBackupAll,$btnRestore,$btnRestoreFile,$btnDeep,$btnVault,$btnVaultLoc)) { Style-Button $b 'secondary' }
+
+# Ghost header buttons
+Style-Button $btnVault 'ghost' 30
+Style-Button $btnVaultLoc 'ghost' 30
+$btnVault.Height = 30; $btnVaultLoc.Height = 30
+$btnVault.Width = 96; $btnVaultLoc.Width = 120
+$headerActions.Controls.Add($btnVaultLoc)
+$headerActions.Controls.Add($btnVault)
+
+# Left action bar
+$leftActions.Controls.Add($btnScan)
+$sep1 = New-Object System.Windows.Forms.Panel
+$sep1.Size = New-Object System.Drawing.Size(1, 26)
+$sep1.BackColor = $script:ColorBorder
+$sep1.Margin = New-Object System.Windows.Forms.Padding(4, 4, 12, 4)
+$leftActions.Controls.Add($sep1)
+$leftActions.Controls.Add($btnBackup)
+$leftActions.Controls.Add($btnBackupAll)
+$sep2 = New-Object System.Windows.Forms.Panel
+$sep2.Size = New-Object System.Drawing.Size(1, 26)
+$sep2.BackColor = $script:ColorBorder
+$sep2.Margin = New-Object System.Windows.Forms.Padding(4, 4, 12, 4)
+$leftActions.Controls.Add($sep2)
+$leftActions.Controls.Add($btnRescan)
+$leftActions.Controls.Add($btnRestore)
+$leftActions.Controls.Add($btnRestoreFile)
+$leftActions.Controls.Add($btnDeep)
+
+# Right action bar: filter
+$lblFilter = New-Object System.Windows.Forms.Label
+$lblFilter.Text = 'Filter'
+$lblFilter.Font = $script:AppFontSmall
+$lblFilter.ForeColor = $script:ColorMuted
+$lblFilter.AutoSize = $true
+$lblFilter.Margin = New-Object System.Windows.Forms.Padding(0, 10, 6, 0)
+$rightActions.Controls.Add($lblFilter)
+$txtFilter = New-Object System.Windows.Forms.TextBox
+$txtFilter.Width = 180
+$txtFilter.Height = 26
+$txtFilter.Font = $script:AppFont
+$txtFilter.Margin = New-Object System.Windows.Forms.Padding(0, 4, 6, 0)
+$rightActions.Controls.Add($txtFilter)
+$btnClearFilter.Width = 26; $btnClearFilter.Height = 26
+Style-Button $btnClearFilter 'secondary' 26
+$btnClearFilter.Text = 'x'
+$btnClearFilter.Margin = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+$rightActions.Controls.Add($btnClearFilter)
+$btnSelectAll.Width = 74; $btnSelectAll.Height = 26
+Style-Button $btnSelectAll 'secondary' 26
+$btnSelectAll.Margin = New-Object System.Windows.Forms.Padding(12, 4, 4, 0)
+$rightActions.Controls.Add($btnSelectAll)
+$btnSelectNone.Width = 62; $btnSelectNone.Height = 26
+Style-Button $btnSelectNone 'secondary' 26
+$btnSelectNone.Margin = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
+$rightActions.Controls.Add($btnSelectNone)
+
+# Stats row
+$stats = New-Object System.Windows.Forms.TableLayoutPanel
+$stats.Dock = 'Fill'
+$stats.ColumnCount = 4
+$stats.RowCount = 1
+$stats.BackColor = $script:ColorBg
+$stats.Padding = New-Object System.Windows.Forms.Padding(12, 0, 12, 8)
+for ($c = 0; $c -lt 4; $c++) {
+    [void]$stats.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 25)))
+}
+[void]$stats.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$statGamesCard = New-StatCard 'Games' ([ref]$script:statGamesVal)
+$statLocsCard  = New-StatCard 'Save locations' ([ref]$script:statLocsVal)
+$statSizeCard  = New-StatCard 'Total size' ([ref]$script:statSizeVal)
+$statSelCard   = New-StatCard 'Selected' ([ref]$script:statSelVal)
+foreach ($card in @($statGamesCard,$statLocsCard,$statSizeCard,$statSelCard)) {
+    $card.Margin = New-Object System.Windows.Forms.Padding(0, 0, 12, 0)
+}
+$statSelCard.Margin = New-Object System.Windows.Forms.Padding(0)
+$stats.Controls.Add($statGamesCard, 0, 0)
+$stats.Controls.Add($statLocsCard, 1, 0)
+$stats.Controls.Add($statSizeCard, 2, 0)
+$stats.Controls.Add($statSelCard, 3, 0)
+
+# Content panel (list + empty state)
+$content = New-Object System.Windows.Forms.Panel
+$content.Dock = 'Fill'
+$content.BackColor = $script:ColorBg
+$content.Padding = New-Object System.Windows.Forms.Padding(12, 0, 12, 12)
 
 $list = New-Object System.Windows.Forms.ListView
 $list.Dock = 'Fill'
-$list.View = 'Details'
+$list.View = [System.Windows.Forms.View]::Details
 $list.CheckBoxes = $true
 $list.FullRowSelect = $true
 $list.GridLines = $false
 $list.HideSelection = $false
 $list.MultiSelect = $true
-$list.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$list.Font = $script:AppFont
+$list.BackColor = $script:ColorSurface
+$list.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$list.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Clickable
+$list.ShowItemToolTips = $true
+$rowIcons = New-Object System.Windows.Forms.ImageList
+$rowIcons.ImageSize = New-Object System.Drawing.Size(1, 22)
+$rowIcons.ColorDepth = [System.Windows.Forms.ColorDepth]::Depth32Bit
+$rowIcons.Images.Add((New-Object System.Drawing.Bitmap(1, 22)))
+$list.SmallImageList = $rowIcons
 
-[void]$list.Columns.Add('Game', 330)
-[void]$list.Columns.Add('Source', 70)
-[void]$list.Columns.Add('Saves', 55, [System.Windows.Forms.HorizontalAlignment]::Center)
-[void]$list.Columns.Add('Size', 85, [System.Windows.Forms.HorizontalAlignment]::Right)
-[void]$list.Columns.Add('Save folders (first 3)', 520)
+[void]$list.Columns.Add('Game', 300)
+[void]$list.Columns.Add('Source', 90)
+[void]$list.Columns.Add('Saves', 70, [System.Windows.Forms.HorizontalAlignment]::Center)
+[void]$list.Columns.Add('Size', 90, [System.Windows.Forms.HorizontalAlignment]::Right)
+[void]$list.Columns.Add('Save folders (first 3)', 420)
 
+# Empty state panel
+$emptyPanel = New-Object System.Windows.Forms.Panel
+$emptyPanel.Dock = 'Fill'
+$emptyPanel.BackColor = $script:ColorSurface
+$emptyPanel.Visible = $false
+$emptyInner = New-Object System.Windows.Forms.TableLayoutPanel
+$emptyInner.Dock = 'Fill'
+$emptyInner.ColumnCount = 1
+$emptyInner.RowCount = 5
+$emptyInner.BackColor = $script:ColorSurface
+[void]$emptyInner.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 35)))
+[void]$emptyInner.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$emptyInner.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$emptyInner.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$emptyInner.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 65)))
+[void]$emptyInner.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$emptyTitle = New-Object System.Windows.Forms.Label
+$emptyTitle.Text = 'No saves loaded yet'
+$emptyTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 14)
+$emptyTitle.ForeColor = $script:ColorText
+$emptyTitle.AutoSize = $true
+$emptyTitle.Anchor = [System.Windows.Forms.AnchorStyles]::None
+$emptyTitle.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 6)
+$emptyInner.Controls.Add($emptyTitle, 0, 1)
+$emptyText = New-Object System.Windows.Forms.Label
+$emptyText.Text = 'Choose the folders you want GameSaveVault to search.'
+$emptyText.Font = $script:AppFont
+$emptyText.ForeColor = $script:ColorMuted
+$emptyText.AutoSize = $true
+$emptyText.Anchor = [System.Windows.Forms.AnchorStyles]::None
+$emptyText.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 16)
+$emptyInner.Controls.Add($emptyText, 0, 2)
+$emptyBtns = New-Object System.Windows.Forms.FlowLayoutPanel
+$emptyBtns.AutoSize = $true
+$emptyBtns.Anchor = [System.Windows.Forms.AnchorStyles]::None
+$emptyBtns.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+$emptyInner.Controls.Add($emptyBtns, 0, 3)
+$emptyScanBtn = New-Object System.Windows.Forms.Button
+$emptyScanBtn.Text = 'Scan folders...'
+$emptyScanBtn.Width = 140; $emptyScanBtn.Height = 36
+Style-Button $emptyScanBtn 'primary' 36
+$emptyBtns.Controls.Add($emptyScanBtn)
+$emptyClearBtn = New-Object System.Windows.Forms.Button
+$emptyClearBtn.Text = 'Clear filter'
+$emptyClearBtn.Width = 110; $emptyClearBtn.Height = 36
+Style-Button $emptyClearBtn 'secondary' 36
+$emptyClearBtn.Margin = New-Object System.Windows.Forms.Padding(8, 0, 0, 0)
+$emptyClearBtn.Visible = $false
+$emptyBtns.Controls.Add($emptyClearBtn)
+$emptyPanel.Controls.Add($emptyInner)
+$content.Controls.Add($emptyPanel)
+$content.Controls.Add($list)
+
+# Status strip
 $status = New-Object System.Windows.Forms.StatusStrip
+$status.BackColor = $script:ColorSurface
+$status.Dock = 'Fill'
 $statusLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
 $statusLabel.Text = 'Ready'
 $statusLabel.Spring = $true
-$statusLabel.TextAlign = 'MiddleLeft'
+$statusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$statusLabel.ForeColor = $script:ColorText
+$progressBar = New-Object System.Windows.Forms.ToolStripProgressBar
+$progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+$progressBar.Visible = $false
+$progressBar.Width = 120
 $vaultLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
 $vaultLabel.Text = 'Vault: ' + $script:Vault
-$vaultLabel.ForeColor = [System.Drawing.Color]::DimGray
+$vaultLabel.ForeColor = $script:ColorMuted
 [void]$status.Items.Add($statusLabel)
-[void]$status.Items.Add($vaultLabel)
+[void]$status.Items.Add($progressBar)
+$vaultLabel.Add_Click({ $btnVault.PerformClick() })
 
-$form.Controls.Add($list)
-$form.Controls.Add($top)
-$form.Controls.Add($status)
+# Assemble
+$root.Controls.Add($header, 0, 0)
+$root.Controls.Add($menu, 0, 1)
+$root.Controls.Add($actions, 0, 2)
+$root.Controls.Add($stats, 0, 3)
+$root.Controls.Add($content, 0, 4)
+$root.Controls.Add($status, 0, 5)
+$form.Controls.Add($root)
+
+# Context menu for the list
+$ctx = New-Object System.Windows.Forms.ContextMenuStrip
+$ctxmiOpen = New-Object System.Windows.Forms.ToolStripMenuItem 'Open save folder'
+$ctxmiBackup = New-Object System.Windows.Forms.ToolStripMenuItem 'Back up this game'
+$ctxmiCopy = New-Object System.Windows.Forms.ToolStripMenuItem 'Copy save path'
+[void]$ctx.Items.Add($ctxmiOpen)
+[void]$ctx.Items.Add($ctxmiBackup)
+[void]$ctx.Items.Add($ctxmiCopy)
+[void]$ctx.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$ctxmiSelAll = New-Object System.Windows.Forms.ToolStripMenuItem 'Select all'
+$ctxmiClear = New-Object System.Windows.Forms.ToolStripMenuItem 'Clear selection'
+[void]$ctx.Items.Add($ctxmiSelAll)
+[void]$ctx.Items.Add($ctxmiClear)
+$list.ContextMenuStrip = $ctx
+
+#endregion
+
+#region ---------------------------------------------------------------- data
 
 #endregion
 
@@ -1205,10 +1765,7 @@ function Update-VaultLabel {
 }
 
 function Load-ScanDatabase {
-    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $statusLabel.Text = 'Loading stored scan database...'
-    $form.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
+    Set-GuiBusy -Busy $true -Text 'Loading stored scan database...'
 
     try {
         $db = Read-GSVScanDatabase
@@ -1217,11 +1774,9 @@ function Load-ScanDatabase {
         $script:Global = @()
         $script:Emulators = @()
 
-        $list.BeginUpdate()
-        $list.Items.Clear()
-
         if (-not $db -or $locs.Count -eq 0) {
-            $list.EndUpdate()
+            $script:AllGames = @()
+            Update-GameList
             $statusLabel.Text = 'No scan database yet. Click "Scan folders..." to choose where to look.'
             return
         }
@@ -1243,38 +1798,34 @@ function Load-ScanDatabase {
             $paths = @($groupLocs | Where-Object { $_.Kind -ne 'Registry' -and $_.ResolvedPath } | ForEach-Object { [string]$_.ResolvedPath })
             $preview = if ($paths.Count -eq 0) { '(registry only)' } else { ($paths | Select-Object -First 3) -join '; ' }
 
-            $item = New-Object System.Windows.Forms.ListViewItem([string]$first.GameName)
-            [void]$item.SubItems.Add([string]$first.Source)
-            [void]$item.SubItems.Add([string]$groupLocs.Count)
-            [void]$item.SubItems.Add((Format-GSVSize $bytes))
-            [void]$item.SubItems.Add($preview)
+            $missing = @($groupLocs | Where-Object { -not $_.Exists })
+            $checked = ($missing.Count -lt $groupLocs.Count)
 
             $game = [pscustomobject]@{
                 Name      = [string]$first.GameName
                 Source    = [string]$first.Source
                 AppId     = [string]$first.AppId
                 Locations = $groupLocs
+                Files     = $files
+                Bytes     = $bytes
+                Preview   = $preview
+                Missing   = if ($missing.Count -eq $groupLocs.Count) { 'all' } else { '' }
+                Checked   = $checked
             }
-            $item.Tag = $game
-
-            $missing = @($groupLocs | Where-Object { -not $_.Exists })
-            $item.Checked = ($missing.Count -lt $groupLocs.Count)
-            if ($missing.Count -eq $groupLocs.Count) { $item.ForeColor = [System.Drawing.Color]::Gray }
-
-            [void]$list.Items.Add($item)
             $games.Add($game)
         }
 
         $script:Games = $games.ToArray()
-        $list.EndUpdate()
+        $script:AllGames = $script:Games
 
         $updated = if ($db.UpdatedUtc) { ([datetime]$db.UpdatedUtc).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { 'unknown' }
+        Update-GameList
         $statusLabel.Text = ('{0} games, {1} save locations from scan database (updated {2}). Vault: {3}' -f $script:Games.Count, $locs.Count, $updated, $script:Vault)
     } catch {
         Show-Error "Could not load the scan database: $($_.Exception.Message)"
         $statusLabel.Text = 'Could not load the scan database.'
     } finally {
-        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        Set-GuiBusy -Busy $false -Text ''
     }
 }
 
@@ -1290,10 +1841,7 @@ function Invoke-GuiScanRoots {
     $roots = @($Roots | Where-Object { $_ })
     if ($roots.Count -eq 0) { return }
 
-    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $statusLabel.Text = ('Scanning {0} folder(s)...' -f $roots.Count)
-    $form.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
+    Set-GuiBusy -Busy $true -Text ('Scanning {0} folder(s)...' -f $roots.Count)
 
     $progress = {
         param($folders, $path)
@@ -1342,11 +1890,8 @@ function Invoke-GuiScanRoots {
         Show-Error "Scan failed: $($_.Exception.Message)"
         $statusLabel.Text = 'Scan failed.'
     } finally {
-        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        Set-GuiBusy -Busy $false -Text ''
     }
-}
-
-function Rescan-StoredRoots {
     $db = Read-GSVScanDatabase
     $roots = @(Get-GSVScanDatabaseRoots | ForEach-Object { [string]$_.Path })
     if ($roots.Count -eq 0) {
@@ -1371,10 +1916,7 @@ function Invoke-GuiBackup {
         return
     }
 
-    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $statusLabel.Text = ('Backing up {0} save locations...' -f $Locations.Count)
-    $form.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
+    Set-GuiBusy -Busy $true -Text ('Backing up {0} save locations...' -f $Locations.Count)
 
     try {
         $r = New-GSVSnapshot -Locations $Locations -BackupRoot $script:Vault -Label $Label
@@ -1386,11 +1928,8 @@ function Invoke-GuiBackup {
         Show-Error "Backup failed: $($_.Exception.Message)"
         $statusLabel.Text = 'Backup failed.'
     } finally {
-        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        Set-GuiBusy -Busy $false -Text ''
     }
-}
-
-function Invoke-GuiExportDatabase {
     $db = Read-GSVScanDatabase
     $locs = @(Get-GSVScanDatabaseLocations -OnlyExisting)
     $snaps = @(Get-GSVSnapshots -BackupRoot $script:Vault)
@@ -1723,12 +2262,106 @@ $list.Add_DoubleClick({
 
 $list.Add_ItemCheck({
     $item = $this.Items[$_.Index]
-    if ($_.NewValue -eq [System.Windows.Forms.CheckState]::Checked) {
-        $g = $item.Tag
-        if ($g -and @($g.Locations).Count -eq 0) {
+    $g = $item.Tag
+    if ($g) {
+        if ($_.NewValue -eq [System.Windows.Forms.CheckState]::Checked -and @($g.Locations).Count -eq 0) {
             $_.NewValue = [System.Windows.Forms.CheckState]::Unchecked
+        } else {
+            $g.Checked = ($_.NewValue -eq [System.Windows.Forms.CheckState]::Checked)
+            Update-GuiStats
         }
     }
+})
+
+# --- polished UI wiring -----------------------------------------------------
+$btnSelectAll.Add_Click({
+    foreach ($item in $list.Items) { $item.Checked = $true; if ($item.Tag) { $item.Tag.Checked = $true } }
+    Update-GuiStats
+})
+$btnSelectNone.Add_Click({
+    foreach ($item in $list.Items) { $item.Checked = $false; if ($item.Tag) { $item.Tag.Checked = $false } }
+    Update-GuiStats
+})
+$btnClearFilter.Add_Click({ $txtFilter.Text = '' })
+$txtFilter.Add_TextChanged({
+    $script:GameFilter = $txtFilter.Text
+    Update-GameList
+})
+$list.Add_ColumnClick({
+    param($s, $e)
+    if ($script:SortColumn -eq $e.Column) { $script:SortAsc = -not $script:SortAsc } else { $script:SortColumn = $e.Column; $script:SortAsc = $true }
+    Update-GameList
+})
+$emptyScanBtn.Add_Click({ $btnScan.PerformClick() })
+$emptyClearBtn.Add_Click({ $txtFilter.Text = '' })
+
+# context menu
+$ctxmiOpen.Add_Click({ Open-SelectedGameFolder })
+$ctxmiBackup.Add_Click({
+    if ($list.SelectedItems.Count -eq 0) { return }
+    $g = $list.SelectedItems[0].Tag
+    if ($g) { Invoke-GuiBackup -Locations @($g.Locations) -Label 'gui-context' }
+})
+$ctxmiCopy.Add_Click({
+    if ($list.SelectedItems.Count -eq 0) { return }
+    $g = $list.SelectedItems[0].Tag
+    if ($g) {
+        $paths = @($g.Locations | Where-Object { $_.ResolvedPath } | ForEach-Object { $_.ResolvedPath }) -join "`r`n"
+        if ($paths) { [System.Windows.Forms.Clipboard]::SetText($paths) }
+    }
+})
+$ctxmiSelAll.Add_Click({ $btnSelectAll.PerformClick() })
+$ctxmiClear.Add_Click({ $btnSelectNone.PerformClick() })
+
+# menu items
+Add-MenuItem $mFile 'Backup selected' $btnBackup 'Ctrl+B'
+Add-MenuItem $mFile 'Backup all' $btnBackupAll 'Ctrl+Shift+B'
+Add-MenuItem $mFile 'Restore snapshot...' $btnRestore 'Ctrl+R'
+Add-MenuItem $mFile 'Restore from file...' $btnRestoreFile 'Ctrl+O'
+Add-MenuItem $mFile 'Export database...' $btnExportDb 'Ctrl+E'
+Add-MenuItem $mFile '' $null -Separator
+Add-MenuItem $mFile 'Backup location...' $btnVaultLoc
+Add-MenuItem $mFile 'Open vault' $btnVault 'Ctrl+Shift+O'
+Add-MenuItem $mFile '' $null -Separator
+$miExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
+$miExit.Add_Click({ $form.Close() })
+[void]$mFile.DropDownItems.Add($miExit)
+
+Add-MenuItem $mScan 'Scan folders...' $btnScan 'Ctrl+N'
+Add-MenuItem $mScan 'Rescan' $btnRescan 'F5'
+Add-MenuItem $mScan 'Deep scan...' $btnDeep 'Ctrl+D'
+Add-MenuItem $mScan 'Windows.old recovery...' $btnOld
+Add-MenuItem $mEmu 'Migrate console saves...' $btnMigrate
+Add-MenuItem $mGames 'Add custom game...' $btnAdd
+Add-MenuItem $mGames 'Save rules...' $btnRules
+Add-MenuItem $mGames '' $null -Separator
+$miFind = New-Object System.Windows.Forms.ToolStripMenuItem 'Find / filter'
+$miFind.ShortcutKeys = [System.Windows.Forms.Keys]::Control -bor [System.Windows.Forms.Keys]::F
+$miFind.Add_Click({ $txtFilter.Focus() })
+[void]$mGames.DropDownItems.Add($miFind)
+Add-MenuItem $mGames 'Select all' $btnSelectAll 'Ctrl+A'
+Add-MenuItem $mGames 'Clear selection' $btnSelectNone
+
+Add-MenuItem $mHelp 'Diagnostics (Doctor)' $btnDoctor
+$miAbout = New-Object System.Windows.Forms.ToolStripMenuItem 'About'
+$miAbout.Add_Click({
+    $msg = "GameSaveVault`r`nVersion {0}`r`n`r`nBack up and restore PC game saves across Windows reinstalls.`r`n`r`nRepository:`r`nhttps://github.com/MISTERNEGATIVE21/GameSaveVault" -f (Get-GSVVersion)
+    Show-Info $msg 'About GameSaveVault'
+})
+[void]$mHelp.DropDownItems.Add($miAbout)
+
+# cue banner for the filter box
+$form.Add_Shown({
+    try { [GsvNative]::SetCue($txtFilter.Handle, 'Filter games...') } catch { }
+})
+
+# resize: keep the path column filling remaining width
+$list.Add_Resize({
+    if ($list.Columns.Count -lt 5) { return }
+    $fixed = 300 + 90 + 70 + 90
+    $w = $list.ClientSize.Width - $fixed - 4
+    if ($w -lt 200) { $w = 200 }
+    $list.Columns[4].Width = $w
 })
 
 $form.Add_Shown({
