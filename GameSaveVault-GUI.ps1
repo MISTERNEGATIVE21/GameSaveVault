@@ -1261,6 +1261,21 @@ function Update-GuiStats {
     if ($btnBackup) { $btnBackup.Enabled = ($checked -gt 0) }
 }
 
+function Update-CheckAllState {
+    if (-not $chkAll) { return }
+    $script:UpdatingCheckAll = $true
+    if ($list.Items.Count -eq 0) {
+        $chkAll.CheckState = [System.Windows.Forms.CheckState]::Unchecked
+    } else {
+        $checked = 0
+        foreach ($item in $list.Items) { if ($item.Checked) { $checked++ } }
+        if ($checked -eq 0) { $chkAll.CheckState = [System.Windows.Forms.CheckState]::Unchecked }
+        elseif ($checked -eq $list.Items.Count) { $chkAll.CheckState = [System.Windows.Forms.CheckState]::Checked }
+        else { $chkAll.CheckState = [System.Windows.Forms.CheckState]::Indeterminate }
+    }
+    $script:UpdatingCheckAll = $false
+}
+
 function Update-GameList {
     if (-not $list) { return }
     $games = @($script:AllGames)
@@ -1300,6 +1315,8 @@ function Update-GameList {
         $i++
     }
     $list.EndUpdate()
+
+    Update-CheckAllState
 
     if ($emptyPanel) {
         if ($list.Items.Count -eq 0) {
@@ -1541,7 +1558,6 @@ $sep1.BackColor = $script:ColorBorder
 $sep1.Margin = New-Object System.Windows.Forms.Padding(4, 4, 12, 4)
 $leftActions.Controls.Add($sep1)
 $leftActions.Controls.Add($btnBackup)
-$leftActions.Controls.Add($btnBackupAll)
 $sep2 = New-Object System.Windows.Forms.Panel
 $sep2.Size = New-Object System.Drawing.Size(1, 26)
 $sep2.BackColor = $script:ColorBorder
@@ -1636,6 +1652,27 @@ $list.SmallImageList = $rowIcons
 [void]$list.Columns.Add('Save folders (first 3)', 420)
 
 # Empty state panel
+# Header tick-mark: select / deselect all visible items
+$chkAll = New-Object System.Windows.Forms.CheckBox
+$chkAll.Size = New-Object System.Drawing.Size(16, 16)
+$chkAll.Location = New-Object System.Drawing.Point(16, 6)
+$chkAll.ThreeState = $true
+$chkAll.FlatStyle = [System.Windows.Forms.FlatStyle]::Standard
+$chkAll.BackColor = $script:ColorSurface
+$script:UpdatingCheckAll = $false
+$chkAll.Add_CheckedChanged({
+    if ($script:UpdatingCheckAll) { return }
+    if ($chkAll.CheckState -eq [System.Windows.Forms.CheckState]::Indeterminate) { return }
+    $script:UpdatingCheckAll = $true
+    $val = $chkAll.Checked
+    foreach ($item in $list.Items) {
+        $item.Checked = $val
+        if ($item.Tag) { $item.Tag.Checked = $val }
+    }
+    $script:UpdatingCheckAll = $false
+    Update-GuiStats
+})
+
 $emptyPanel = New-Object System.Windows.Forms.Panel
 $emptyPanel.Dock = 'Fill'
 $emptyPanel.BackColor = $script:ColorSurface
@@ -1687,6 +1724,8 @@ $emptyBtns.Controls.Add($emptyClearBtn)
 $emptyPanel.Controls.Add($emptyInner)
 $content.Controls.Add($emptyPanel)
 $content.Controls.Add($list)
+$content.Controls.Add($chkAll)
+$chkAll.BringToFront()
 
 # Status strip
 $status = New-Object System.Windows.Forms.StatusStrip
@@ -2272,6 +2311,7 @@ $list.Add_ItemCheck({
             $_.NewValue = [System.Windows.Forms.CheckState]::Unchecked
         } else {
             $g.Checked = ($_.NewValue -eq [System.Windows.Forms.CheckState]::Checked)
+            Update-CheckAllState
             Update-GuiStats
         }
     }
@@ -2319,7 +2359,6 @@ $ctxmiClear.Add_Click({ $btnSelectNone.PerformClick() })
 
 # menu items
 Add-MenuItem $mFile 'Backup selected' $btnBackup 'Ctrl+B'
-Add-MenuItem $mFile 'Backup all' $btnBackupAll 'Ctrl+Shift+B'
 Add-MenuItem $mFile 'Restore snapshot...' $btnRestore 'Ctrl+R'
 Add-MenuItem $mFile 'Restore from file...' $btnRestoreFile 'Ctrl+O'
 Add-MenuItem $mFile 'Export database...' $btnExportDb 'Ctrl+E'
