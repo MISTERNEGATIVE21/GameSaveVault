@@ -2668,7 +2668,50 @@ function Get-GSVEmulatorSaveIndex {
                 }
             } else {
                 $candidate = Join-Path $hit.DataDir $saveRoot
-                if (Test-Path -LiteralPath $candidate) {
+                if (-not (Test-Path -LiteralPath $candidate)) { continue }
+                if ($def.Console -eq 'Nintendo Switch') {
+                    # Switch saves can be nested several levels deep
+                    # (save\<user>\<save-id>\<title>), so walk recursively and
+                    # treat a 16-hex folder as a title only when it actually
+                    # contains save data (files or 0/1/... subfolders).
+                    $stack = New-Object System.Collections.Generic.Stack[object]
+                    $stack.Push([pscustomobject]@{ Dir = $candidate; Depth = 0 })
+                    while ($stack.Count -gt 0) {
+                        $node = $stack.Pop()
+                        $dir = [string]$node.Dir
+                        $depth = [int]$node.Depth
+                        if ($depth -gt 8) { continue }
+                        $leafName = Split-Path -Leaf $dir
+                        $children = @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue)
+                        $has16HexChild = $false
+                        foreach ($c in $children) {
+                            if ($c.Name -match '^[0-9a-fA-F]{16}$') { $has16HexChild = $true; break }
+                        }
+                        $isTitle = $false
+                        if ($leafName -match '^[0-9a-fA-F]{16}$' -and $dir -ne $candidate) {
+                            # A title folder never contains another 16/32-hex folder;
+                            # profile / save-id containers do.
+                            if (-not $has16HexChild) {
+                                # skip empty folders
+                                $hasAny = ($children.Count -gt 0) -or (@(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue).Count -gt 0)
+                                if ($hasAny) { $isTitle = $true }
+                            }
+                        }
+                        if ($isTitle) {
+                            $parentName = ''
+                            try { $parentName = Split-Path -Leaf (Split-Path -Parent $dir) } catch { }
+                            $rows.Add([pscustomobject]@{
+                                EmulatorId = $def.Id; EmulatorName = $def.Name; Console = $def.Console
+                                TitleId = $leafName; ProfileId = $parentName
+                                Path = $dir; DataDir = $hit.DataDir; SaveRoot = $candidate; Origin = $hit.Origin
+                            })
+                            continue
+                        }
+                        foreach ($c in $children) {
+                            $stack.Push([pscustomobject]@{ Dir = $c.FullName; Depth = $depth + 1 })
+                        }
+                    }
+                } else {
                     Add-GSVEmulatorSaveEntries -Rows $rows -Def $def -DataDir $hit.DataDir -SaveRoot $candidate -Origin $hit.Origin
                 }
             }

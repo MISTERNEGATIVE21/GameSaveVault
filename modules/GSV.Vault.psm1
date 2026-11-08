@@ -901,27 +901,47 @@ function Copy-GSVEmulatorSaves {
             # Pick the matching destination save root: prefer the same subsystem
             # (user saves vs system saves), then the first one available.
             $destRoot = $destRoots[0].SaveRoot
+            $srcIsSystem = [bool]($entry.SaveRoot -match '(?i)\\system\\save')
+            foreach ($candidate in $destRoots) {
+                $candIsSystem = [bool]($candidate.SaveRoot -match '(?i)\\system\\save')
+                if ($candIsSystem -eq $srcIsSystem) { $destRoot = $candidate.SaveRoot; break }
+            }
             foreach ($candidate in $destRoots) {
                 $candLeaf = Split-Path -Leaf $candidate.SaveRoot
                 $srcLeaf = Split-Path -Leaf $entry.SaveRoot
                 if ($candLeaf -ieq $srcLeaf) { $destRoot = $candidate.SaveRoot; break }
             }
-            foreach ($candidate in $destRoots) {
-                if ($candidate.SaveRoot -match '(?i)\\user\\save$' -and $entry.SaveRoot -match '(?i)\\user\\save$') { $destRoot = $candidate.SaveRoot; break }
-            }
 
-            # Profile mapping: keep the source profile if the destination knows it,
-            # otherwise use the destination's own profile slot.
-            $profile = [string]$entry.ProfileId
-            if ($profile) {
-                $profileDir = Join-Path $destRoot $profile
-                if (-not (Test-Path -LiteralPath $profileDir)) {
-                    $existing = @(Get-ChildItem -LiteralPath $destRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)
-                    if ($existing.Count -gt 0) { $profile = $existing[0].Name }
+            # Generalise to any nesting depth: keep the path below the save root
+            # (profile\...\title) and only remap the top-level profile folder.
+            $rel = ''
+            try {
+                $rel = $entry.Path.Substring($entry.SaveRoot.Length).TrimStart('\')
+            } catch { $rel = [string]$entry.TitleId }
+            if ([string]::IsNullOrWhiteSpace($rel)) { $rel = [string]$entry.TitleId }
+
+            $parts = @($rel -split '\\')
+            if ($parts.Count -le 1) {
+                # Flat layout (no profile folder): the single component is the title.
+                $profile = ''
+                $rest = if ($parts.Count -eq 1) { $parts[0] } else { [string]$entry.TitleId }
+            } else {
+                $srcProfile = $parts[0]
+                $rest = ($parts[1..($parts.Count - 1)]) -join '\'
+
+                # Profile mapping: keep the source profile if the destination knows it,
+                # otherwise use the destination's own profile slot.
+                $profile = $srcProfile
+                if ($profile) {
+                    $profileDir = Join-Path $destRoot $profile
+                    if (-not (Test-Path -LiteralPath $profileDir)) {
+                        $existing = @(Get-ChildItem -LiteralPath $destRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)
+                        if ($existing.Count -gt 0) { $profile = $existing[0].Name }
+                    }
                 }
             }
 
-            $dest = if ($profile) { Join-Path (Join-Path $destRoot $profile) $entry.TitleId } else { Join-Path $destRoot $entry.TitleId }
+            $dest = if ($profile) { Join-Path $destRoot (Join-Path $profile $rest) } else { Join-Path $destRoot $rest }
         }
 
         if ($DryRun) {

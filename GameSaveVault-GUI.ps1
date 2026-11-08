@@ -453,37 +453,114 @@ function Select-SnapshotDialog {
 }
 
 function Show-DeepScanDialog {
-    $roots = New-Object System.Collections.Generic.List[string]
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Deep scan - choose what to search'
+    $dlg.Size = New-Object System.Drawing.Size(520, 420)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.MinimizeBox = $false
+    $dlg.MaximizeBox = $false
+    $dlg.Font = $script:AppFont
 
-    # mode picker: search a drive, or one or more specific directories
-    $mode = Read-GuiText 'Deep scan - what to search?' "Type a drive letter (C:), ALL for every fixed drive,`nor a folder path (D:\Games, C:\PS5GAMES, ...):" $env:SystemDrive
-    if (-not $mode) { return }
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = 'Select the drives to search (deep scan walks every folder):'
+    $lbl.AutoSize = $true
+    $lbl.Location = New-Object System.Drawing.Point(12, 12)
+    $dlg.Controls.Add($lbl)
 
-    if ($mode -ieq 'all' -or $mode -ieq '*') {
-        foreach ($r in @(Get-GSVFixedDriveRoots)) { $roots.Add($r) }
-    } else {
-        # accept several paths separated by ';'
-        foreach ($part in ($mode -split ';')) {
-            $p = $part.Trim()
-            if (-not $p) { continue }
-            if ($p -match '^[A-Za-z]$') { $p = $p + ':\' }
-            elseif ($p -match '^[A-Za-z]:$') { $p = $p + '\' }
-            if (-not $p.EndsWith('\')) { $p += '\' }
-            $roots.Add($p)
-        }
-        # also offer a folder browser for a custom directory
-        if (($roots.Count -eq 0) -or (-not (Test-Path -LiteralPath ($roots[0].TrimEnd('\'))))) {
-            $picked = Select-Folder 'Choose a directory to deep-scan'
-            if ($picked) { $roots.Add($picked.TrimEnd('\') + '\') }
-        }
+    $clb = New-Object System.Windows.Forms.CheckedListBox
+    $clb.Location = New-Object System.Drawing.Point(12, 36)
+    $clb.Size = New-Object System.Drawing.Size(480, 150)
+    $clb.CheckOnClick = $true
+    $clb.Font = $script:AppFont
+    foreach ($d in @(Get-GSVFixedDriveRoots)) {
+        [void]$clb.Items.Add($d, $true)
     }
+    if ($clb.Items.Count -eq 0) {
+        [void]$clb.Items.Add($env:SystemDrive + '\', $true)
+    }
+    $dlg.Controls.Add($clb)
+
+    $lbl2 = New-Object System.Windows.Forms.Label
+    $lbl2.Text = 'Or add custom folders (separated by ;):'
+    $lbl2.AutoSize = $true
+    $lbl2.Location = New-Object System.Drawing.Point(12, 196)
+    $dlg.Controls.Add($lbl2)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Location = New-Object System.Drawing.Point(12, 220)
+    $txt.Size = New-Object System.Drawing.Size(390, 24)
+    $txt.Font = $script:AppFont
+    $dlg.Controls.Add($txt)
+
+    $btnBrowse = New-Object System.Windows.Forms.Button
+    $btnBrowse.Text = 'Browse...'
+    $btnBrowse.Location = New-Object System.Drawing.Point(410, 218)
+    $btnBrowse.Size = New-Object System.Drawing.Size(82, 28)
+    Style-Button $btnBrowse 'secondary' 28
+    $btnBrowse.Add_Click({
+        $p = Select-Folder 'Choose a directory to deep-scan'
+        if ($p) {
+            if ([string]::IsNullOrWhiteSpace($txt.Text)) { $txt.Text = $p } else { $txt.Text = $txt.Text.TrimEnd(';') + ';' + $p }
+        }
+    })
+    $dlg.Controls.Add($btnBrowse)
+
+    $chkStd = New-Object System.Windows.Forms.CheckBox
+    $chkStd.Text = 'Also include standard launcher / emulator save folders'
+    $chkStd.AutoSize = $true
+    $chkStd.Location = New-Object System.Drawing.Point(12, 256)
+    $chkStd.Checked = $true
+    $dlg.Controls.Add($chkStd)
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = 'Scan'
+    $btnOk.Location = New-Object System.Drawing.Point(320, 340)
+    $btnOk.Size = New-Object System.Drawing.Size(90, 32)
+    Style-Button $btnOk 'primary' 32
+    $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($btnOk)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = 'Cancel'
+    $btnCancel.Location = New-Object System.Drawing.Point(420, 340)
+    $btnCancel.Size = New-Object System.Drawing.Size(90, 32)
+    Style-Button $btnCancel 'secondary' 32
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnCancel)
+
+    $dlg.AcceptButton = $btnOk
+    $dlg.CancelButton = $btnCancel
+
+    if ($dlg.ShowDialog() -ne 'OK') { $dlg.Dispose(); return }
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($i in $clb.CheckedItems) { $roots.Add(([string]$i).TrimEnd('\') + '\') }
+    foreach ($part in ($txt.Text -split ';')) {
+        $p = $part.Trim()
+        if (-not $p) { continue }
+        if ($p -match '^[A-Za-z]$') { $p = $p + ':\' }
+        elseif ($p -match '^[A-Za-z]:$') { $p = $p + '\' }
+        if (-not $p.EndsWith('\')) { $p += '\' }
+        $roots.Add($p)
+    }
+
+    $includeStandard = $chkStd.Checked
+    $dlg.Dispose()
+
+    # de-duplicate
+    $seen = @{}
+    $uniq = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $roots) {
+        $k = $r.TrimEnd('\').ToLowerInvariant()
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $uniq.Add($r)
+    }
+    $roots = $uniq
 
     if ($roots.Count -eq 0) { Show-Warn 'No drive or directory to scan.'; return }
 
-    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $statusLabel.Text = ('Deep scanning {0}...' -f ($roots -join ', '))
-    $form.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
+    Set-GuiBusy -Busy $true -Text ('Deep scanning {0}...' -f ($roots -join ', '))
 
     $progress = {
         param($folders, $path)
@@ -494,12 +571,12 @@ function Show-DeepScanDialog {
     try {
         $locs = @(Get-GSVDeepScanLocations -Roots $roots.ToArray() -MaxDepth 12 -MaxResults 1000 -Progress $progress)
     } catch {
-        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        Set-GuiBusy -Busy $false -Text ''
         Show-Error "Deep scan failed: $($_.Exception.Message)"
         $statusLabel.Text = 'Deep scan failed.'
         return
     } finally {
-        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+        Set-GuiBusy -Busy $false -Text ''
     }
 
     $statusLabel.Text = ('Deep scan found {0} save location(s).' -f $locs.Count)
@@ -509,13 +586,13 @@ function Show-DeepScanDialog {
     }
 
     # Keep the stored database in sync with this ad-hoc deep scan.
-    try { $null = Update-GSVScanDatabase -Roots $roots.ToArray() -Locations $locs } catch { }
+    try { $null = Update-GSVScanDatabase -Roots $roots.ToArray() -Locations $locs -IncludeStandard:$includeStandard } catch { }
 
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = ('Deep scan results  -  {0} save location(s)' -f $locs.Count)
-    $dlg.Size = New-Object System.Drawing.Size(1120, 620)
-    $dlg.StartPosition = 'CenterParent'
-    $dlg.MinimizeBox = $false
+    $rdlg = New-Object System.Windows.Forms.Form
+    $rdlg.Text = ('Deep scan results  -  {0} save location(s)' -f $locs.Count)
+    $rdlg.Size = New-Object System.Drawing.Size(1120, 620)
+    $rdlg.StartPosition = 'CenterParent'
+    $rdlg.MinimizeBox = $false
 
     $lv = New-Object System.Windows.Forms.ListView
     $lv.Dock = 'Fill'
@@ -523,7 +600,7 @@ function Show-DeepScanDialog {
     $lv.CheckBoxes = $true
     $lv.FullRowSelect = $true
     $lv.GridLines = $false
-    $lv.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $lv.Font = $script:AppFont
     [void]$lv.Columns.Add('Game', 260)
     [void]$lv.Columns.Add('AppId', 80)
     [void]$lv.Columns.Add('Files', 70, [System.Windows.Forms.HorizontalAlignment]::Right)
@@ -554,20 +631,20 @@ function Show-DeepScanDialog {
 
     $btnAll.Add_Click({ foreach ($i in $lv.Items) { $i.Checked = $true } })
     $btnNone.Add_Click({ foreach ($i in $lv.Items) { $i.Checked = $false } })
-    $btnClose.Add_Click({ $dlg.Close() })
+    $btnClose.Add_Click({ $rdlg.Close() })
     $btnBackup.Add_Click({
         $chosen = New-Object System.Collections.Generic.List[object]
         foreach ($i in $lv.CheckedItems) { $chosen.Add($i.Tag) }
         if ($chosen.Count -eq 0) { Show-Warn 'Nothing checked.'; return }
-        $dlg.Close()
+        $rdlg.Close()
         Invoke-GuiBackup -Locations $chosen.ToArray() -Label 'gui-deep-scan'
     })
 
     $panel.Controls.AddRange(@($btnAll, $btnNone, $btnBackup, $btnClose))
-    $dlg.Controls.Add($lv)
-    $dlg.Controls.Add($panel)
-    [void]$dlg.ShowDialog()
-    $dlg.Dispose()
+    $rdlg.Controls.Add($lv)
+    $rdlg.Controls.Add($panel)
+    [void]$rdlg.ShowDialog()
+    $rdlg.Dispose()
     Load-ScanDatabase
 }
 
