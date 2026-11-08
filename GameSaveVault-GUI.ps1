@@ -1959,7 +1959,7 @@ function Invoke-GuiScanRoots {
     param([string[]]$Roots, [bool]$IncludeStandard = $true)
 
     $roots = @($Roots | Where-Object { $_ })
-    if ($roots.Count -eq 0) { return }
+    if ($roots.Count -eq 0 -and -not $IncludeStandard) { return }
 
     Set-GuiBusy -Busy $true -Text ('Scanning {0} folder(s)...' -f $roots.Count)
 
@@ -2014,7 +2014,14 @@ function Invoke-GuiScanRoots {
     }
     $db = Read-GSVScanDatabase
     $roots = @(Get-GSVScanDatabaseRoots | ForEach-Object { [string]$_.Path })
+    $includeStandard = if ($db -and ($db.PSObject.Properties.Name -contains 'IncludeStandard')) { [bool]$db.IncludeStandard } else { $true }
     if ($roots.Count -eq 0) {
+        if ($includeStandard) {
+            # No custom folders are stored, but the standard launcher / emulator
+            # save folders can still be rescanned on their own.
+            Invoke-GuiScanRoots -Roots @() -IncludeStandard $true
+            return
+        }
         $choice = Show-ScanFoldersDialog
         if ($choice) {
             Invoke-GuiScanRoots -Roots $choice.Roots -IncludeStandard:$choice.IncludeStandard
@@ -2024,7 +2031,6 @@ function Invoke-GuiScanRoots {
         return
     }
 
-    $includeStandard = if ($db -and ($db.PSObject.Properties.Name -contains 'IncludeStandard')) { [bool]$db.IncludeStandard } else { $true }
     Invoke-GuiScanRoots -Roots $roots -IncludeStandard:$includeStandard
 }
 
