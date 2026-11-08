@@ -659,6 +659,24 @@ GameSaveVault\
 
 ---
 
+## Decoded console game names
+
+Console emulator saves are keyed by a *title ID*, not a game name. GameSaveVault ships a bundled title database (`data/title-names.json`, ~2,300 Nintendo Switch titles from the community switchbrew list) so those saves show up as **"The Legend of Zelda: Breath of the Wild"** instead of `01007EF00011E000`.
+
+- The database is loaded automatically; nothing to configure.
+- Add your own entries by creating `config/title-names.json` (same `{ "titleid": "Game name" }` format) — it overrides the bundled list. Useful for newer games or DLC.
+- About `prod.keys` / `title.keys`: these files only contain encryption keys. They do **not** contain game names, so they cannot be used to decode a title ID. Names come from the title database above (or, on a real console, from the game's NACP metadata).
+
+## Linux, macOS and Wine
+
+GameSaveVault is built for **Windows PowerShell 5.1 + WinForms**. The vault format itself is platform-neutral (plain files, `config/scan-database.json`, portable `.gsvdb` zips), so a backup made on Windows can be restored anywhere.
+
+- **Wine:** the CLI scripts can run under Wine with a Windows PowerShell install, and WinForms works in Wine with Mono/.NET. Expect to adapt the default paths (`%APPDATA%`, `%LOCALAPPDATA%`, drive letters) and skip the registry-related rules. The GUI has not been tested on Wine.
+- **Native Linux/macOS:** not supported today. A port would need a cross-platform discovery/backup layer (the current one is Windows-specific: drive letters, registry, WinForms). Contributions welcome — the data formats are documented and stable.
+- Practical workflow today: back up on Windows, copy the vault (or a `.gsvdb` file) to Linux, and restore the save folders manually into the Wine prefix or native emulator data directory.
+
+---
+
 ## Notes
 
 - Works with **any games**, including **crack games and emulators**. Use it with games you own. The tool only copies save data; it does not provide game files, cracks or DRM bypasses.

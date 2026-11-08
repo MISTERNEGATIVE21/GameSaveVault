@@ -58,6 +58,30 @@ function Write-GSVLog {
 function Get-GSVRoot { $script:Root }
 function Get-GSVVersion { $script:GSVVersion }
 
+# Title-id -> human name lookup (Switch and other consoles). Loaded lazily from
+# data/title-names.json plus an optional per-install override in the config dir.
+$script:TitleNames = $null
+function Get-GSVTitleName {
+    param([string]$TitleId)
+    if ([string]::IsNullOrWhiteSpace($TitleId)) { return $null }
+    if ($null -eq $script:TitleNames) {
+        $map = @{}
+        foreach ($p in @((Join-Path $script:Root 'data\title-names.json'), (Join-Path $script:ConfigDir 'title-names.json'))) {
+            if (-not (Test-Path -LiteralPath $p)) { continue }
+            try {
+                $obj = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+                foreach ($prop in $obj.PSObject.Properties) {
+                    $map[$prop.Name.ToLowerInvariant()] = [string]$prop.Value
+                }
+            } catch { }
+        }
+        $script:TitleNames = $map
+    }
+    $key = $TitleId.Trim().ToLowerInvariant()
+    if ($script:TitleNames.ContainsKey($key)) { return $script:TitleNames[$key] }
+    return $null
+}
+
 function Write-GSVTextFile {
     param([string]$Path, [string]$Text)
     $dir = Split-Path -Parent $Path
@@ -2729,9 +2753,12 @@ function Get-GSVEmulatorSaveLocations {
         $size = $null
         if (-not $NoSize) { $size = Measure-GSVPathSize -Path $row.Path }
 
+        $titleName = Get-GSVTitleName -TitleId $row.TitleId
+        $gameName = if ($titleName) { $titleName } else { ("{0} title {1}" -f ($row.Console -replace 'Nintendo ', '' -replace 'PlayStation ', 'PS'), $row.TitleId) }
+
         $locations.Add([pscustomobject]@{
             GameId         = 'emu-' + $row.EmulatorId + '-' + (ConvertTo-GSVNormalName -Name $row.TitleId)
-            GameName       = ("{0} title {1}" -f ($row.Console -replace 'Nintendo ', '' -replace 'PlayStation ', 'PS'), $row.TitleId)
+            GameName       = $gameName
             Source         = $row.EmulatorName
             AppId          = [string]$row.TitleId
             InstallDirHint = ''

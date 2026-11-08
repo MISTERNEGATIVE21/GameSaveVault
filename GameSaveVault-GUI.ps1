@@ -1798,11 +1798,15 @@ function Load-ScanDatabase {
             $paths = @($groupLocs | Where-Object { $_.Kind -ne 'Registry' -and $_.ResolvedPath } | ForEach-Object { [string]$_.ResolvedPath })
             $preview = if ($paths.Count -eq 0) { '(registry only)' } else { ($paths | Select-Object -First 3) -join '; ' }
 
+            $displayName = [string]$first.GameName
+            $titleName = Get-GSVTitleName -TitleId $first.AppId
+            if ($titleName) { $displayName = $titleName }
+
             $missing = @($groupLocs | Where-Object { -not $_.Exists })
             $checked = ($missing.Count -lt $groupLocs.Count)
 
             $game = [pscustomobject]@{
-                Name      = [string]$first.GameName
+                Name      = $displayName
                 Source    = [string]$first.Source
                 AppId     = [string]$first.AppId
                 Locations = $groupLocs
