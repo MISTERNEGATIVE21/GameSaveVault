@@ -2683,15 +2683,17 @@ function Get-GSVEmulatorSaveIndex {
                         if ($depth -gt 8) { continue }
                         $leafName = Split-Path -Leaf $dir
                         $children = @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue)
-                        $has16HexChild = $false
+                        # Container folders are named with hex ids: the profile owner
+                        # is 16 hex digits, the save id is 32 hex digits.
+                        $hasHexChild = $false
                         foreach ($c in $children) {
-                            if ($c.Name -match '^[0-9a-fA-F]{16}$') { $has16HexChild = $true; break }
+                            if ($c.Name -match '^[0-9a-fA-F]{8,}$') { $hasHexChild = $true; break }
                         }
                         $isTitle = $false
                         if ($leafName -match '^[0-9a-fA-F]{16}$' -and $dir -ne $candidate) {
-                            # A title folder never contains another 16/32-hex folder;
-                            # profile / save-id containers do.
-                            if (-not $has16HexChild) {
+                            # A title folder never contains another hex-named
+                            # container folder; profile / save-id folders do.
+                            if (-not $hasHexChild) {
                                 # skip empty folders
                                 $hasAny = ($children.Count -gt 0) -or (@(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue).Count -gt 0)
                                 if ($hasAny) { $isTitle = $true }

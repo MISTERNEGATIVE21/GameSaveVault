@@ -49,6 +49,7 @@ $profile = Join-Path $sandbox 'Users\tester'
 $vault = Join-Path $sandbox 'vault'
 
 $edenRoaming = Join-Path $profile 'AppData\Roaming\eden'
+$eglantineRoaming = Join-Path $profile 'AppData\Roaming\Eglantine'
 $ryujinxRoaming = Join-Path $profile 'AppData\Roaming\ryujinx'
 $kytyPortable = Join-Path $sandbox 'KytyPS5'
 $shadRoaming = Join-Path $profile 'AppData\Roaming\shadPS4'
@@ -80,6 +81,12 @@ try {
     New-TestFile (Join-Path $edenRoaming 'nand\user\save\0000000000000000\0100000000010000\save.dat') 'eden-save-1'
     New-TestFile (Join-Path $edenRoaming 'nand\user\save\0000000000000000\0100000000010000\slot1\data.bin') 'eden-save-1b'
     New-TestFile (Join-Path $edenRoaming 'nand\system\save\8000000000000000\0100abcd00001234\sys.dat') 'eden-sys'
+    # Current Eden/Eglantine layout: save\<profile owner>\<32-hex save id>\<title>.
+    $edenSaveId = '5F48D24BFFCC99081A58ABE9AE484898'
+    New-TestFile (Join-Path $edenRoaming ("nand\user\save\0000000000000000\{0}\0100000000010099\save.dat" -f $edenSaveId)) 'eden-nested'
+
+    # --- Eglantine (Switch) - same roaming\user layout as Eden --------------
+    New-TestFile (Join-Path $eglantineRoaming ("nand\user\save\0000000000000000\{0}\0100000000010098\save.dat" -f $edenSaveId)) 'eglantine-nested'
 
     # --- Ryujinx (Switch) - destination already has an older save -----------
     New-TestFile (Join-Path $ryujinxRoaming 'bis\user\save\BBBBBBBBBBBBBBBB\0100000000010000\save.dat') 'ryujinx-old-save'
@@ -139,6 +146,9 @@ try {
     Write-Host ''
 
     Assert-True (@($locs | Where-Object { $_.Source -eq 'Eden' -and $_.AppId -eq '0100000000010000' }).Count -ge 1) 'Eden save must be found by Switch title id'
+    Assert-True (@($locs | Where-Object { $_.Source -eq 'Eden' -and $_.AppId -eq '0100000000010099' }).Count -ge 1) 'Eden nested <profile>\<32-hex save id>\<title> save must be found'
+    Assert-True (@($locs | Where-Object { $_.Source -eq 'Eglantine' -and $_.AppId -eq '0100000000010098' }).Count -ge 1) 'Eglantine roaming\user nested save must be found'
+    Assert-True (@($locs | Where-Object { $_.Source -eq 'Eden' -and $_.AppId -eq '0000000000000000' }).Count -eq 0) 'Eden profile owner folder must not be reported as a title'
     Assert-True (@($locs | Where-Object { $_.Source -eq 'Ryujinx' -and $_.AppId -eq '0100000000010000' }).Count -ge 1) 'Ryujinx save must be found by Switch title id'
     Assert-True (@($locs | Where-Object { $_.Source -eq 'Kyty / KytyPS5' -and $_.AppId -eq 'PPSA01341' }).Count -ge 1) 'Kyty _SaveData\PPSA01341 must be found'
     Assert-True (@($locs | Where-Object { [string]$_.AppId -eq 'CUSA00001' }).Count -ge 1) 'shadPS4 savedata\CUSA00001 must be found'
