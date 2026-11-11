@@ -1360,6 +1360,199 @@ EOF
 }
 
 # ==============================================================================
+# CLI Dispatcher Tests (gamevault.sh and linux/gamevault.sh)
+# ==============================================================================
+
+test_cli_root_forwarding() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    assert_true "[ -f '$root_sh' ]" "Root gamevault.sh exists"
+    assert_true "[ -x '$root_sh' ]" "Root gamevault.sh is executable"
+
+    local output code
+    output=$("$root_sh" --help 2>&1)
+    code=$?
+    assert_equals "0" "$code" "Root gamevault.sh --help exits with 0"
+    assert_match "GameSaveVault" "$output" "Root script outputs GameSaveVault header"
+    assert_match "Commands:" "$output" "Root script lists commands"
+}
+
+test_cli_help_options() {
+    local linux_sh="$REPO_ROOT/linux/gamevault.sh"
+    assert_true "[ -f '$linux_sh' ]" "linux/gamevault.sh exists"
+    assert_true "[ -x '$linux_sh' ]" "linux/gamevault.sh is executable"
+
+    local out1 out2 out3 code
+    out1=$("$linux_sh" help 2>&1)
+    code=$?
+    assert_equals "0" "$code" "gamevault.sh help exits with 0"
+    assert_match "Usage:" "$out1" "help contains Usage:"
+
+    out2=$("$linux_sh" --help 2>&1)
+    code=$?
+    assert_equals "0" "$code" "gamevault.sh --help exits with 0"
+
+    out3=$("$linux_sh" -h 2>&1)
+    code=$?
+    assert_equals "0" "$code" "gamevault.sh -h exits with 0"
+}
+
+test_cli_no_args_non_interactive() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    local output code
+    output=$("$root_sh" < /dev/null 2>&1)
+    code=$?
+    assert_equals "0" "$code" "No-args in non-interactive mode exits with 0"
+    assert_match "Usage:" "$output" "No-args in non-interactive mode outputs usage"
+}
+
+test_cli_doctor() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    local output code
+    output=$("$root_sh" doctor 2>&1)
+    code=$?
+    assert_equals "0" "$code" "gamevault.sh doctor exits with 0"
+    assert_match "Health Check" "$output" "gamevault.sh doctor outputs health check summary"
+}
+
+test_cli_invalid_command() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    local output code
+    output=$("$root_sh" invalid-command-name 2>&1)
+    code=$?
+    assert_equals "1" "$code" "Invalid command exits with status 1"
+    assert_match "Unknown command" "$output" "Invalid command outputs unknown command error"
+}
+
+test_cli_scan_and_scan_db() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    local test_env_dir="$TEST_TMP_DIR/cli_scan_env"
+    mkdir -p "$test_env_dir/config" "$test_env_dir/custom_games/MyGame"
+    echo "save_data" > "$test_env_dir/custom_games/MyGame/slot1.sav"
+
+    local output code
+    # 1. scan-db with no database yet
+    output=$(GSV_CONFIG_DIR="$test_env_dir/config" "$root_sh" scan-db 2>&1)
+    code=$?
+    assert_equals "0" "$code" "scan-db with empty db exits 0"
+    assert_match "No scan database" "$output" "scan-db reports no database found"
+
+    # 2. scan-folders on custom dir
+    output=$(GSV_CONFIG_DIR="$test_env_dir/config" "$root_sh" scan-folders --dirs "$test_env_dir/custom_games" 2>&1)
+    code=$?
+    assert_equals "0" "$code" "scan-folders exits 0"
+    assert_match "MyGame" "$output" "scan-folders finds MyGame"
+
+    # 3. scan-db after scanning
+    output=$(GSV_CONFIG_DIR="$test_env_dir/config" "$root_sh" scan-db 2>&1)
+    code=$?
+    assert_equals "0" "$code" "scan-db after scan exits 0"
+    assert_match "MyGame" "$output" "scan-db displays MyGame"
+
+    # 4. scan command
+    output=$(GSV_CONFIG_DIR="$test_env_dir/config" "$root_sh" scan 2>&1)
+    code=$?
+    assert_equals "0" "$code" "scan exits 0"
+}
+
+test_cli_backup_and_restore_dry_run() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    local test_env_dir="$TEST_TMP_DIR/cli_backup_dry"
+    local mock_config="$test_env_dir/config"
+    local mock_vault="$test_env_dir/vault"
+    local mock_game_dir="$test_env_dir/games/TestHero"
+    mkdir -p "$mock_config" "$mock_vault" "$mock_game_dir"
+    echo "hero_save_content" > "$mock_game_dir/hero.sav"
+
+    # Populate scan database
+    local locs='[
+      {
+        "GameId": "custom-testhero",
+        "GameName": "TestHero",
+        "Source": "Custom",
+        "AppId": "",
+        "Token": "HOME",
+        "RelativePath": "games/TestHero",
+        "AbsolutePath": "'"$mock_game_dir"'",
+        "ResolvedPath": "'"$mock_game_dir"'",
+        "Kind": "Directory",
+        "FileCount": 1,
+        "Bytes": 17,
+        "Origin": "custom"
+      }
+    ]'
+    GSV_CONFIG_DIR="$mock_config" gsv_update_scan_database "$locs" "[\"$test_env_dir/games\"]"
+
+    # Backup dry run
+    local out_backup code
+    out_backup=$(GSV_CONFIG_DIR="$mock_config" "$root_sh" backup --dry-run --vault "$mock_vault" 2>&1)
+    code=$?
+    assert_equals "0" "$code" "backup --dry-run exits 0"
+    assert_match "dry-run" "$out_backup" "backup --dry-run mentions dry-run"
+    assert_true "[ ! -d '$mock_vault/snapshots' ]" "backup --dry-run created no snapshot directory"
+
+    # Real backup so restore dry run has a snapshot to inspect
+    GSV_CONFIG_DIR="$mock_config" "$root_sh" backup --label "dry-test" --vault "$mock_vault" >/dev/null 2>&1
+
+    # Restore dry run
+    local out_restore
+    out_restore=$(GSV_CONFIG_DIR="$mock_config" "$root_sh" restore --dry-run --vault "$mock_vault" 2>&1)
+    code=$?
+    assert_equals "0" "$code" "restore --dry-run exits 0"
+    assert_match "dry-run" "$out_restore" "restore --dry-run mentions dry-run"
+}
+
+test_cli_snapshots() {
+    local root_sh="$REPO_ROOT/gamevault.sh"
+    local test_env_dir="$TEST_TMP_DIR/cli_snapshots_env"
+    local mock_config="$test_env_dir/config"
+    local mock_vault="$test_env_dir/vault"
+    local mock_game_dir="$test_env_dir/games/Chrono"
+    mkdir -p "$mock_config" "$mock_vault" "$mock_game_dir"
+    echo "chrono_save" > "$mock_game_dir/save.dat"
+
+    local locs='[
+      {
+        "GameId": "custom-chrono",
+        "GameName": "ChronoTrigger",
+        "Source": "Custom",
+        "Token": "HOME",
+        "RelativePath": "games/Chrono",
+        "AbsolutePath": "'"$mock_game_dir"'",
+        "ResolvedPath": "'"$mock_game_dir"'",
+        "Kind": "Directory",
+        "FileCount": 1,
+        "Bytes": 11,
+        "Origin": "custom"
+      }
+    ]'
+    GSV_CONFIG_DIR="$mock_config" gsv_update_scan_database "$locs"
+
+    # Snapshots before any backup
+    local out_none code
+    out_none=$("$root_sh" snapshots --vault "$mock_vault" 2>&1)
+    code=$?
+    assert_equals "0" "$code" "snapshots exits 0 when empty"
+    assert_match "No snapshots found" "$out_none" "snapshots reports no snapshots found"
+
+    # Create backup
+    GSV_CONFIG_DIR="$mock_config" "$root_sh" backup --label "chrono-release" --vault "$mock_vault" >/dev/null 2>&1
+
+    # Snapshots table view
+    local out_table
+    out_table=$("$root_sh" snapshots --vault "$mock_vault" 2>&1)
+    code=$?
+    assert_equals "0" "$code" "snapshots exits 0 after backup"
+    assert_match "chrono-release" "$out_table" "snapshots output includes label chrono-release"
+
+    # Snapshots json view
+    local out_json
+    out_json=$("$root_sh" snapshots --vault "$mock_vault" --json 2>&1)
+    code=$?
+    assert_equals "0" "$code" "snapshots --json exits 0"
+    assert_match "chrono-release" "$out_json" "snapshots --json includes label"
+}
+
+# ==============================================================================
 # Runner
 # ==============================================================================
 echo -e "${BLUE}=== Running Linux GameSaveVault Test Suite ===${NC}"
@@ -1410,6 +1603,15 @@ run_test test_ui_action_restore_jq "Restore snapshot UI action with jq (_gsv_ui_
 run_test test_ui_action_restore_python "Restore snapshot UI action with python3 fallback (_gsv_ui_action_restore)"
 run_test test_ui_action_configure_vault "Configure vault UI action settings update (_gsv_ui_action_configure_vault)"
 run_test test_dashboard_game_count_python_fallback "Dashboard game count extraction under python3 fallback (_gsv_ui_get_game_count)"
+
+run_test test_cli_root_forwarding "Root gamevault.sh forwards to linux/gamevault.sh"
+run_test test_cli_help_options "CLI help options (--help, -h, help)"
+run_test test_cli_no_args_non_interactive "CLI non-interactive execution with no arguments displays help"
+run_test test_cli_doctor "CLI doctor command executes health check"
+run_test test_cli_invalid_command "CLI invalid command returns exit code 1"
+run_test test_cli_scan_and_scan_db "CLI scan, scan-folders, and scan-db workflows"
+run_test test_cli_backup_and_restore_dry_run "CLI backup and restore --dry-run flags"
+run_test test_cli_snapshots "CLI snapshots list in table and json formats"
 
 echo
 echo -e "${BLUE}=== Test Summary ===${NC}"
