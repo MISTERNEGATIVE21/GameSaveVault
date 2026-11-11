@@ -1234,6 +1234,131 @@ test_launch_dashboard_exit() {
     assert_equals "0" "$status" "Dashboard loop exits cleanly on option 8"
 }
 
+test_ui_action_browse_snapshots_jq() {
+    local mock_cfg="$TEST_TMP_DIR/mock_browse_jq_cfg"
+    local mock_vault="$TEST_TMP_DIR/mock_browse_jq_vault"
+    local mock_saves="$TEST_TMP_DIR/mock_browse_jq_saves"
+    mkdir -p "$mock_cfg" "$mock_saves/BrowseGameA" "$mock_vault"
+    echo '{"BackupRoot": "'"$mock_vault"'"}' > "$mock_cfg/settings.json"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    echo "save_a" > "$mock_saves/BrowseGameA/save.dat"
+
+    local locs='[{"Game": "BrowseGameA", "OriginalPath": "'"$mock_saves/BrowseGameA"'"}]'
+    GSV_JSON_TOOL="jq"
+    gsv_create_snapshot "$locs" 0 "browse-label-jq" "$mock_vault" >/dev/null 2>&1
+
+    local out
+    out=$(printf "1\n" | GSV_UI_MODE="cli" GSV_JSON_TOOL="jq" _gsv_ui_action_browse_snapshots)
+    local status=$?
+    assert_equals "0" "$status" "_gsv_ui_action_browse_snapshots with jq succeeded"
+    assert_match "BrowseGameA" "$out" "Snapshot details contains game name under jq"
+    assert_match "browse-label-jq" "$out" "Snapshot details contains label under jq"
+}
+
+test_ui_action_browse_snapshots_python() {
+    local mock_cfg="$TEST_TMP_DIR/mock_browse_py_cfg"
+    local mock_vault="$TEST_TMP_DIR/mock_browse_py_vault"
+    local mock_saves="$TEST_TMP_DIR/mock_browse_py_saves"
+    mkdir -p "$mock_cfg" "$mock_saves/BrowseGamePy" "$mock_vault"
+    echo '{"BackupRoot": "'"$mock_vault"'"}' > "$mock_cfg/settings.json"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    echo "save_py" > "$mock_saves/BrowseGamePy/save.dat"
+
+    local locs='[{"Game": "BrowseGamePy", "OriginalPath": "'"$mock_saves/BrowseGamePy"'"}]'
+    GSV_JSON_TOOL="python3"
+    gsv_create_snapshot "$locs" 0 "browse-label-py" "$mock_vault" >/dev/null 2>&1
+
+    local out
+    out=$(printf "1\n" | GSV_UI_MODE="cli" GSV_JSON_TOOL="python3" _gsv_ui_action_browse_snapshots)
+    local status=$?
+    assert_equals "0" "$status" "_gsv_ui_action_browse_snapshots with python3 succeeded"
+    assert_match "BrowseGamePy" "$out" "Snapshot details contains game name under python3"
+    assert_match "browse-label-py" "$out" "Snapshot details contains label under python3"
+}
+
+test_ui_action_restore_jq() {
+    local mock_cfg="$TEST_TMP_DIR/mock_restore_ui_jq_cfg"
+    local mock_vault="$TEST_TMP_DIR/mock_restore_ui_jq_vault"
+    local mock_saves="$TEST_TMP_DIR/mock_restore_ui_jq_saves"
+    mkdir -p "$mock_cfg" "$mock_saves/RestoreGameJQ" "$mock_vault"
+    echo '{"BackupRoot": "'"$mock_vault"'"}' > "$mock_cfg/settings.json"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    echo "restore_data_jq" > "$mock_saves/RestoreGameJQ/save.dat"
+
+    local locs='[{"Game": "RestoreGameJQ", "OriginalPath": "'"$mock_saves/RestoreGameJQ"'"}]'
+    GSV_JSON_TOOL="jq"
+    gsv_create_snapshot "$locs" 0 "restore-snap-jq" "$mock_vault" >/dev/null 2>&1
+
+    local out
+    out=$(printf "1\n1\n\ny\n" | GSV_UI_MODE="cli" GSV_JSON_TOOL="jq" _gsv_ui_action_restore)
+    local status=$?
+    assert_equals "0" "$status" "_gsv_ui_action_restore with jq succeeded"
+    assert_match "Restore Dry Run Complete" "$out" "Restore action confirmed dry run with jq"
+}
+
+test_ui_action_restore_python() {
+    local mock_cfg="$TEST_TMP_DIR/mock_restore_ui_py_cfg"
+    local mock_vault="$TEST_TMP_DIR/mock_restore_ui_py_vault"
+    local mock_saves="$TEST_TMP_DIR/mock_restore_ui_py_saves"
+    mkdir -p "$mock_cfg" "$mock_saves/RestoreGamePy" "$mock_vault"
+    echo '{"BackupRoot": "'"$mock_vault"'"}' > "$mock_cfg/settings.json"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    echo "restore_data_py" > "$mock_saves/RestoreGamePy/save.dat"
+
+    local locs='[{"Game": "RestoreGamePy", "OriginalPath": "'"$mock_saves/RestoreGamePy"'"}]'
+    GSV_JSON_TOOL="python3"
+    gsv_create_snapshot "$locs" 0 "restore-snap-py" "$mock_vault" >/dev/null 2>&1
+
+    local out
+    out=$(printf "1\n1\n\ny\n" | GSV_UI_MODE="cli" GSV_JSON_TOOL="python3" _gsv_ui_action_restore)
+    local status=$?
+    assert_equals "0" "$status" "_gsv_ui_action_restore with python3 succeeded"
+    assert_match "Restore Dry Run Complete" "$out" "Restore action confirmed dry run with python3"
+}
+
+test_ui_action_configure_vault() {
+    local mock_cfg="$TEST_TMP_DIR/mock_cfg_test"
+    local old_vault="$TEST_TMP_DIR/old_mock_vault"
+    local new_vault="$TEST_TMP_DIR/new_mock_vault"
+    mkdir -p "$mock_cfg" "$old_vault"
+
+    export GSV_CONFIG_DIR="$mock_cfg"
+    echo '{"BackupRoot": "'"$old_vault"'"}' > "$mock_cfg/settings.json"
+
+    # Use here-string so _gsv_ui_action_configure_vault runs in current shell, not a subshell pipeline
+    GSV_UI_MODE="cli" _gsv_ui_action_configure_vault <<< "$(printf "%s\ny\n" "$new_vault")" >/dev/null 2>&1
+    local status=$?
+    assert_equals "0" "$status" "_gsv_ui_action_configure_vault succeeded"
+
+    # Verify settings.json exists and BackupRoot is set
+    local settings_file="$mock_cfg/settings.json"
+    assert_true "[ -f '$settings_file' ]" "settings.json created"
+    local configured_path
+    configured_path="$(gsv_json_get "$settings_file" ".BackupRoot")"
+    assert_equals "$new_vault" "$configured_path" "settings.json has correct BackupRoot"
+    assert_equals "$new_vault" "$GSV_VAULT_PATH" "GSV_VAULT_PATH was updated"
+}
+
+test_dashboard_game_count_python_fallback() {
+    local mock_db="$TEST_TMP_DIR/mock_db_count.json"
+    cat <<'EOF' > "$mock_db"
+{
+  "Version": "1.0",
+  "Locations": [
+    {"Game": "Game1", "OriginalPath": "/path/1"},
+    {"Game": "Game2", "OriginalPath": "/path/2"}
+  ]
+}
+EOF
+    local count
+    count=$(GSV_JSON_TOOL="python3" _gsv_ui_get_game_count "$mock_db")
+    assert_equals "2" "$count" "_gsv_ui_get_game_count returns 2 under python3 fallback"
+}
+
 # ==============================================================================
 # Runner
 # ==============================================================================
@@ -1279,6 +1404,12 @@ run_test test_ui_dir_picker_cli "Headless CLI directory picker (gsv_ui_dir_picke
 run_test test_ui_input_cli "Headless CLI text input prompt (gsv_ui_input)"
 run_test test_doctor_health_check "Health check diagnostics (gsv_run_doctor)"
 run_test test_launch_dashboard_exit "Interactive dashboard main menu loop (gsv_launch_dashboard)"
+run_test test_ui_action_browse_snapshots_jq "Browse snapshots UI action with jq (_gsv_ui_action_browse_snapshots)"
+run_test test_ui_action_browse_snapshots_python "Browse snapshots UI action with python3 fallback (_gsv_ui_action_browse_snapshots)"
+run_test test_ui_action_restore_jq "Restore snapshot UI action with jq (_gsv_ui_action_restore)"
+run_test test_ui_action_restore_python "Restore snapshot UI action with python3 fallback (_gsv_ui_action_restore)"
+run_test test_ui_action_configure_vault "Configure vault UI action settings update (_gsv_ui_action_configure_vault)"
+run_test test_dashboard_game_count_python_fallback "Dashboard game count extraction under python3 fallback (_gsv_ui_get_game_count)"
 
 echo
 echo -e "${BLUE}=== Test Summary ===${NC}"

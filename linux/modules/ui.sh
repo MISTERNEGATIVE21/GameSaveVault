@@ -32,6 +32,37 @@ if [ -z "${_GSV_VAULT_LOADED:-}" ]; then
 fi
 
 # ==============================================================================
+# Helper Utilities
+# ==============================================================================
+
+# _gsv_ui_get_game_count(db_file)
+# Returns the number of locations tracked in the scan database.
+# Works safely across both jq and python3 fallbacks.
+_gsv_ui_get_game_count() {
+    local db_file="${1:-}"
+    if [ ! -f "$db_file" ]; then
+        echo 0
+        return 0
+    fi
+    local tool="${GSV_JSON_TOOL:-}"
+    if [ "$tool" = "jq" ] || { [ -z "$tool" ] && command -v jq >/dev/null 2>&1; }; then
+        jq '.Locations | length' "$db_file" 2>/dev/null || echo 0
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import sys, json
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(len(data.get("Locations", [])))
+except Exception:
+    print(0)
+' "$db_file" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+# ==============================================================================
 # Mode Detection
 # ==============================================================================
 
@@ -637,12 +668,8 @@ gsv_run_doctor() {
     _doc_line "--- Database & Snapshots ---"
     local db_file="$config_dir/scan-database.json"
     if [ -f "$db_file" ]; then
-        local loc_count=0
-        if command -v jq >/dev/null 2>&1; then
-            loc_count="$(jq '.Locations | length' "$db_file" 2>/dev/null || echo 0)"
-        elif command -v python3 >/dev/null 2>&1; then
-            loc_count="$(python3 -c 'import sys, json; data=json.load(open(sys.argv[1])); print(len(data.get("Locations", [])))' "$db_file" 2>/dev/null || echo 0)"
-        fi
+        local loc_count
+        loc_count="$(_gsv_ui_get_game_count "$db_file")"
         _doc_line "  Scan Database: [OK] Found ($loc_count games tracked)"
     else
         _doc_line "  Scan Database: [INFO] Not initialized yet (run scan to create)"
@@ -735,6 +762,9 @@ _gsv_ui_action_scan_custom() {
 }
 
 _gsv_ui_action_backup() {
+    local vault_path
+    vault_path="$(gsv_resolve_vault_path)"
+
     local db_file="${GSV_CONFIG_DIR:-$GSV_ROOT/config}/scan-database.json"
     if [ ! -f "$db_file" ]; then
         gsv_ui_message "No Scan Database" "No games in database. Please run a scan first." "warning"
@@ -773,7 +803,9 @@ import sys, json
 try:
     data = json.loads(sys.argv[1])
     for item in data:
-        print(f"{item.get(\"Game\", \"Unknown\")}\t{item.get(\"OriginalPath\", \"\")}")
+        gn = item.get("Game") or "Unknown"
+        op = item.get("OriginalPath") or ""
+        print(f"{gn}\t{op}")
 except Exception:
     pass
 ' "$locations" 2>/dev/null)
@@ -818,7 +850,7 @@ except Exception:
 ' "$locations" "$selected_games" 2>/dev/null || echo "[]")
     fi
 
-    gsv_create_snapshot "$filtered_locations" "$is_dry" "$label"
+    gsv_create_snapshot "$filtered_locations" "$is_dry" "$label" "$vault_path"
     local status=$?
     if [ $status -eq 0 ]; then
         if [ "$is_dry" -eq 1 ]; then
@@ -832,10 +864,14 @@ except Exception:
 }
 
 _gsv_ui_action_restore() {
+    local vault_path
+    vault_path="$(gsv_resolve_vault_path)"
+
     local snaps_json
-    snaps_json="$(gsv_list_snapshots --json)"
+    snaps_json="$(gsv_list_snapshots "$vault_path" --json)"
     local count=0
-    if command -v jq >/dev/null 2>&1; then
+    local tool="${GSV_JSON_TOOL:-jq}"
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
         count="$(echo "$snaps_json" | jq '. | length' 2>/dev/null || echo 0)"
     elif command -v python3 >/dev/null 2>&1; then
         count="$(python3 -c 'import sys, json; print(len(json.loads(sys.argv[1])))' "$snaps_json" 2>/dev/null || echo 0)"
@@ -847,12 +883,12 @@ _gsv_ui_action_restore() {
     fi
 
     local menu_items=()
-    if command -v jq >/dev/null 2>&1; then
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
         while IFS=$'\t' read -r sid lbl dt gcount; do
             if [ -n "$sid" ]; then
                 menu_items+=("$sid" "[$dt] $lbl ($gcount games)")
             fi
-        done < <(echo "$snaps_json" | jq -r '.[] | "\(.SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // "")\t\(.Games | length)"' 2>/dev/null)
+        done < <(echo "$snaps_json" | jq -r '.[] | "\(.Id // .SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // "")\t\(.TotalGames // (.Games | length) // 0)"' 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         while IFS=$'\t' read -r sid lbl dt gcount; do
             if [ -n "$sid" ]; then
@@ -862,7 +898,13 @@ _gsv_ui_action_restore() {
 import sys, json
 try:
     for s in json.loads(sys.argv[1]):
-        print(f"{s.get(\"SnapshotId\", \"\")}\t{s.get(\"Label\", \"no-label\")}\t{s.get(\"CreatedAt\", \"\")}\t{len(s.get(\"Games\", []))}")
+        sid = s.get("Id") or s.get("SnapshotId") or ""
+        lbl = s.get("Label") or "no-label"
+        dt = s.get("CreatedAt") or ""
+        tg = s.get("TotalGames")
+        if tg is None:
+            tg = len(s.get("Games", []))
+        print(f"{sid}\t{lbl}\t{dt}\t{tg}")
 except Exception:
     pass
 ' "$snaps_json" 2>/dev/null)
@@ -874,8 +916,6 @@ except Exception:
         return 0
     fi
 
-    local vault_path
-    vault_path="$(gsv_resolve_vault_path)"
     local snap_dir
     snap_dir="$(gsv_resolve_snapshot_dir "$selected_snap" "$vault_path")"
     local manifest="$snap_dir/manifest.json"
@@ -885,12 +925,12 @@ except Exception:
     fi
 
     local game_checklist=()
-    if command -v jq >/dev/null 2>&1; then
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
         while IFS=$'\t' read -r gname orig; do
             if [ -n "$gname" ]; then
                 game_checklist+=("$gname" "$orig" "ON")
             fi
-        done < <(jq -r '.Games[] | "\(.Game)\t\(.OriginalPath // "")"' "$manifest" 2>/dev/null)
+        done < <(jq -r '(.Entries // .Games // [])[] | "\(.Game)\t\(.OriginalPath // "")"' "$manifest" 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         while IFS=$'\t' read -r gname orig; do
             if [ -n "$gname" ]; then
@@ -901,8 +941,11 @@ import sys, json
 try:
     with open(sys.argv[1]) as f:
         mf = json.load(f)
-    for g in mf.get("Games", []):
-        print(f"{g.get(\"Game\", \"Unknown\")}\t{g.get(\"OriginalPath\", \"\")}")
+    entries = mf.get("Entries") or mf.get("Games") or []
+    for g in entries:
+        gn = g.get("Game") or "Unknown"
+        op = g.get("OriginalPath") or ""
+        print(f"{gn}\t{op}")
 except Exception:
     pass
 ' "$manifest" 2>/dev/null)
@@ -925,7 +968,7 @@ except Exception:
     local games_filter
     games_filter="$(echo "$chosen_games" | paste -sd, -)"
 
-    gsv_restore_snapshot "$selected_snap" "$games_filter" "$is_dry" "$custom_root"
+    gsv_restore_snapshot "$selected_snap" "$games_filter" "$is_dry" "$custom_root" "$vault_path"
     local status=$?
     if [ $status -eq 0 ]; then
         if [ "$is_dry" -eq 1 ]; then
@@ -939,10 +982,15 @@ except Exception:
 }
 
 _gsv_ui_action_browse_snapshots() {
+    local vault_path
+    vault_path="$(gsv_resolve_vault_path)"
+
     local snaps_json
-    snaps_json="$(gsv_list_snapshots --json)"
+    snaps_json="$(gsv_list_snapshots "$vault_path" --json)"
     local count=0
-    if command -v jq >/dev/null 2>&1; then
+    local tool="${GSV_JSON_TOOL:-jq}"
+    local tool="${GSV_JSON_TOOL:-jq}"
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
         count="$(echo "$snaps_json" | jq '. | length' 2>/dev/null || echo 0)"
     elif command -v python3 >/dev/null 2>&1; then
         count="$(python3 -c 'import sys, json; print(len(json.loads(sys.argv[1])))' "$snaps_json" 2>/dev/null || echo 0)"
@@ -954,12 +1002,12 @@ _gsv_ui_action_browse_snapshots() {
     fi
 
     local menu_items=()
-    if command -v jq >/dev/null 2>&1; then
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
         while IFS=$'\t' read -r sid lbl dt gcount; do
             if [ -n "$sid" ]; then
                 menu_items+=("$sid" "[$dt] $lbl ($gcount games)")
             fi
-        done < <(echo "$snaps_json" | jq -r '.[] | "\(.SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // "")\t\(.Games | length)"' 2>/dev/null)
+        done < <(echo "$snaps_json" | jq -r '.[] | "\(.Id // .SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // "")\t\(.TotalGames // (.Games | length) // 0)"' 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         while IFS=$'\t' read -r sid lbl dt gcount; do
             if [ -n "$sid" ]; then
@@ -969,7 +1017,13 @@ _gsv_ui_action_browse_snapshots() {
 import sys, json
 try:
     for s in json.loads(sys.argv[1]):
-        print(f"{s.get(\"SnapshotId\", \"\")}\t{s.get(\"Label\", \"no-label\")}\t{s.get(\"CreatedAt\", \"\")}\t{len(s.get(\"Games\", []))}")
+        sid = s.get("Id") or s.get("SnapshotId") or ""
+        lbl = s.get("Label") or "no-label"
+        dt = s.get("CreatedAt") or ""
+        tg = s.get("TotalGames")
+        if tg is None:
+            tg = len(s.get("Games", []))
+        print(f"{sid}\t{lbl}\t{dt}\t{tg}")
 except Exception:
     pass
 ' "$snaps_json" 2>/dev/null)
@@ -989,21 +1043,29 @@ except Exception:
 
     local details="Snapshot: $sid\n"
     if [ -f "$mf" ]; then
-        if command -v jq >/dev/null 2>&1; then
-            details+="$(jq -r '"Label: \(.Label // "none")\nCreated: \(.CreatedAt // "unknown")\nTotal Files: \(.TotalFiles // 0)\nTotal Size: \(.TotalSizeBytes // 0) bytes\nGames:\n" + ([.Games[].Game] | map("  - " + .) | join("\n"))' "$mf" 2>/dev/null)"
+        if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
+            details+="$(jq -r '"Label: \(.Label // "none")\nCreated: \(.CreatedAt // "unknown")\nTotal Files: \(.TotalFiles // 0)\nTotal Size: \(.TotalBytes // .TotalSizeBytes // 0) bytes\nGames:\n" + ([(.Entries // .Games // [])[].Game] | map("  - " + .) | join("\n"))' "$mf" 2>/dev/null)"
         elif command -v python3 >/dev/null 2>&1; then
             details+="$(python3 -c '
 import sys, json
 try:
     with open(sys.argv[1]) as f:
         d = json.load(f)
-    print(f"Label: {d.get(\"Label\", \"none\")}")
-    print(f"Created: {d.get(\"CreatedAt\", \"unknown\")}")
-    print(f"Total Files: {d.get(\"TotalFiles\", 0)}")
-    print(f"Total Size: {d.get(\"TotalSizeBytes\", 0)} bytes")
+    tb = d.get("TotalBytes")
+    if tb is None:
+        tb = d.get("TotalSizeBytes", 0)
+    entries = d.get("Entries") or d.get("Games") or []
+    lbl = d.get("Label") or "none"
+    crt = d.get("CreatedAt") or "unknown"
+    tf = d.get("TotalFiles", 0)
+    print(f"Label: {lbl}")
+    print(f"Created: {crt}")
+    print(f"Total Files: {tf}")
+    print(f"Total Size: {tb} bytes")
     print("Games:")
-    for g in d.get("Games", []):
-        print(f"  - {g.get(\"Game\", \"Unknown\")}")
+    for g in entries:
+        gn = g.get("Game") or "Unknown"
+        print(f"  - {gn}")
 except Exception as e:
     print(str(e))
 ' "$mf" 2>/dev/null)"
@@ -1023,7 +1085,7 @@ _gsv_ui_action_configure_vault() {
 
     if gsv_ui_confirm "Confirm Change" "Set vault directory to:\n$new_vault\nAre you sure?"; then
         mkdir -p "$new_vault" 2>/dev/null || true
-        local config_file="${GSV_CONFIG_DIR:-$GSV_ROOT/config}/config.json"
+        local config_file="${GSV_CONFIG_DIR:-$GSV_ROOT/config}/settings.json"
         gsv_json_set "$config_file" ".BackupRoot" "\"$new_vault\""
         GSV_VAULT_PATH="$new_vault"
         export GSV_VAULT_PATH
@@ -1056,7 +1118,7 @@ gsv_launch_dashboard() {
         local db_file="${GSV_CONFIG_DIR:-$GSV_ROOT/config}/scan-database.json"
         local game_count=0
         if [ -f "$db_file" ]; then
-            game_count="$(gsv_json_get "$db_file" '.Locations | length' 2>/dev/null || echo 0)"
+            game_count="$(_gsv_ui_get_game_count "$db_file")"
             [[ ! "$game_count" =~ ^[0-9]+$ ]] && game_count=0
         fi
 
