@@ -1,8 +1,8 @@
 # GameSaveVault
 
-[**GitHub repository**](https://github.com/MISTERNEGATIVE21/GameSaveVault) · [Install from GitHub](#install-from-github) · [Download ZIP](https://github.com/MISTERNEGATIVE21/GameSaveVault/archive/refs/heads/main.zip)
+[**GitHub repository**](https://github.com/MISTERNEGATIVE21/GameSaveVault) · [Windows Install](#install-from-github) · [Linux Quick Start](#linux-quick-start--usage) · [Download ZIP](https://github.com/MISTERNEGATIVE21/GameSaveVault/archive/refs/heads/main.zip)
 
-A local Windows app that finds your game save folders, copies them into a vault on another drive, and puts them back after you reinstall Windows.
+A cross-platform Windows & Linux app that finds your game save folders, copies them into a vault on another drive, and puts them back after you reinstall the OS or switch systems.
 
 It works with **any games**, including normal Steam/Epic/GOG games, repack and crack games, and emulators. It does not download games, patch DRM, or touch game install files — it only copies save data, profiles and settings.
 
@@ -92,7 +92,8 @@ Use `-WindowsOldRoot "D:\Windows.old"` if the old install is on another drive.
 
 ---
 
-## Quick start
+<a id="quick-start-windows"></a>
+## Quick start (Windows)
 
 Requirements: Windows 10/11, Windows PowerShell 5.1 (built in). No admin rights for normal use.
 
@@ -206,7 +207,171 @@ powershell -ExecutionPolicy Bypass -File .\Install.ps1 -ScheduledTask -Time 21:3
 
 ---
 
-## Commands
+<a id="linux-quick-start--usage"></a>
+## Linux Quick Start & Usage
+
+GameSaveVault includes native, full-featured Linux support via `./gamevault.sh`. It automatically discovers games running under Steam Proton (Native & Flatpak), Wine, Lutris, Heroic Games Launcher, Bottles, console emulators, and native Linux games.
+
+### Quick Start
+
+Ensure `gamevault.sh` is executable and run:
+
+```bash
+chmod +x gamevault.sh
+
+# 1. Launch the interactive dashboard (auto-detects Zenity GUI or Whiptail TUI)
+./gamevault.sh
+# or explicitly:
+./gamevault.sh gui
+
+# 2. Or run CLI workflows directly:
+./gamevault.sh scan              # Discover installed game saves & update scan database
+./gamevault.sh backup            # Snapshot all discovered saves into the vault
+./gamevault.sh snapshots         # List existing snapshots
+./gamevault.sh restore --dry-run # Preview restoring latest snapshot
+./gamevault.sh restore           # Restore saves with automatic rollback protection
+```
+
+**Requirements:**
+- Standard Linux `bash` shell (Ubuntu, Debian, Fedora, Arch Linux, SteamOS, openSUSE, etc.).
+- Optional GUI/TUI utilities: `zenity` (for desktop dialogs) or `whiptail` / `dialog` (for terminal menus).
+- Optional JSON utility: `jq` (falls back to built-in `python3` automatically if `jq` is absent).
+
+---
+
+### Hybrid UI / TUI Architecture
+
+GameSaveVault automatically detects your environment and presents the best user interface available:
+
+1. **Zenity GUI (Desktop)**: When running inside a graphical desktop session (GNOME, KDE Plasma, XFCE, Cinnamon, Hyprland, etc. with `$DISPLAY` or `$WAYLAND_DISPLAY`), GameSaveVault opens native desktop dialogs, folder browsers, and checklists using `zenity`.
+2. **Whiptail TUI (Terminal)**: When running in a terminal session without a graphical desktop (such as an SSH connection, text console, or headless server), GameSaveVault automatically uses `whiptail` (or `dialog`) for fast ncurses-based terminal dialogs.
+3. **CLI Fallback**: If neither `zenity` nor `whiptail` is installed, GameSaveVault provides a clean, colored ANSI text menu and interactive command-line prompts.
+
+You can explicitly force an interface mode using CLI flags or the `GSV_UI_MODE` environment variable:
+
+```bash
+./gamevault.sh --gui    # Force Zenity graphical interface
+./gamevault.sh --tui    # Force Whiptail / dialog terminal interface
+./gamevault.sh --cli    # Force plain text CLI prompt interface
+
+# Or set via environment variable:
+export GSV_UI_MODE=gui  # options: "gui", "tui", "cli"
+```
+
+---
+
+### Linux CLI Commands
+
+| Command | Usage | Description |
+|---|---|---|
+| `scan` | `./gamevault.sh scan` | Automatically discovers game saves across Proton, Wine, Flatpak, Native, and Emulators, displays a formatted table, and records them in `config/scan-database.json`. |
+| `scan-folders` | `./gamevault.sh scan-folders --dirs <p1:p2>` | Deep scans custom folders for save files (`.sav`, `.dat`, `.sl2`, `savedata/`, etc.) and stores results in the database. In interactive mode without `--dirs`, opens a folder picker. |
+| `scan-db` | `./gamevault.sh scan-db` | Displays the current contents of `config/scan-database.json` without re-scanning disk. |
+| `backup` | `./gamevault.sh backup [options]` | Creates a timestamped snapshot of saves in the vault. |
+| `restore` | `./gamevault.sh restore [options]` | Restores game saves from a snapshot. Conflicting existing files are preserved in `vault/rollback/<timestamp>/`. |
+| `snapshots` | `./gamevault.sh snapshots [--json]` | Lists all snapshots in the vault with timestamp, label, size, file count, and errors. |
+| `doctor` | `./gamevault.sh doctor` | Checks required tools (`jq`, `python3`, `tar`), optional UI tools (`zenity`, `whiptail`), vault storage path, and permissions. |
+| `gui` | `./gamevault.sh gui` | Launches the interactive graphical or terminal dashboard. |
+
+#### Command Flags & Options
+
+```bash
+# Backup examples:
+./gamevault.sh backup                                   # Back up all games in scan database
+./gamevault.sh backup --game "Skyrim,Palworld"          # Back up only specific games (comma-separated)
+./gamevault.sh backup --label "before-modding"          # Custom label in snapshot name
+./gamevault.sh backup --dry-run                         # Preview files that would be backed up
+./gamevault.sh backup --vault "/mnt/storage/GameVault"  # Override vault destination folder
+
+# Restore examples:
+./gamevault.sh restore                                  # Restore all games from the latest snapshot
+./gamevault.sh restore --snapshot "20261111-120000"     # Restore from a specific snapshot ID
+./gamevault.sh restore --game "Skyrim"                  # Selectively restore only specific games
+./gamevault.sh restore --dry-run                        # Preview actions without modifying any files
+./gamevault.sh restore --restore-root "/tmp/test"       # Restore files into an alternate directory
+./gamevault.sh restore --vault "/mnt/storage/GameVault" # Override vault location
+
+# Snapshots examples:
+./gamevault.sh snapshots                                # View table of all snapshots
+./gamevault.sh snapshots --json                         # Machine-readable JSON output
+./gamevault.sh snapshots --vault "/custom/vault"        # Inspect custom vault location
+```
+
+---
+
+### Folder Selection & Selective Restore
+
+#### Custom Folder Selection & Deep Scanning
+When games are installed in custom drives or folders (e.g. `/mnt/Games`, `/opt/games`, or portable drives):
+
+- **CLI Directory Specification**: Use `--dirs` with colon, semicolon, or comma-separated paths:
+  ```bash
+  ./gamevault.sh scan-folders --dirs "/mnt/Games:/home/user/CustomSaves"
+  ```
+- **GUI / TUI Folder Browser**: Run `./gamevault.sh scan-folders` without arguments, or choose **Scan Custom Folders...** in the interactive dashboard. A directory chooser dialog will open allowing you to select any directory.
+- **Deep Scan Heuristics**: The scanner traverses folders recursively up to depth 8 searching for known save markers (`.sav`, `.save`, `.dat`, `.bin`, `.sl2`, `savedata/`, `savegames/`), groups them by parent folder, and adds them to `config/scan-database.json`.
+
+#### Selective Restore with Collision Rollback
+- **Select Specific Games**: Restore only the titles you need using `--game "<name>"`:
+  ```bash
+  ./gamevault.sh restore --game "Cyberpunk 2077,Elden Ring"
+  ```
+- **Rollback Safety**: If any target save folder or file already exists, GameSaveVault automatically archives the current version to `vault/rollback/<timestamp>/` before restoring. Your existing saves are never deleted or corrupted.
+- **Dry-Run Preview**: Add `--dry-run` to inspect every copy and rollback step before applying changes:
+  ```bash
+  ./gamevault.sh restore --game "Skyrim" --dry-run
+  ```
+
+---
+
+### Supported Linux Platforms & Save Locations
+
+GameSaveVault on Linux scans standard paths across gaming runtimes and emulators:
+
+1. **Steam Proton (Native & Flatpak)**:
+   - Native Steam: `~/.steam/steam/steamapps/compatdata/<appid>/pfx/drive_c/` and `~/.local/share/Steam/steamapps/compatdata/...`
+   - Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps/compatdata/<appid>/pfx/drive_c/`
+   - Scanned paths inside Proton prefixes:
+     - `users/steamuser/AppData/Local/`
+     - `users/steamuser/AppData/LocalLow/`
+     - `users/steamuser/AppData/Roaming/`
+     - `users/steamuser/Documents/My Games/` and `users/steamuser/Documents/`
+     - `users/steamuser/Saved Games/`
+   - Steam Userdata Cloud Saves: `~/.steam/steam/userdata/<account_id>/<app_id>/`
+   - Steam App IDs are mapped to game names using `data/title-names.json` and Steam manifests.
+
+2. **Native Linux Games**:
+   - `~/.local/share/<GameName>/`
+   - `~/.config/<GameName>/`
+
+3. **Wine, Lutris, Heroic & Bottles**:
+   - Wine Default Prefix: `~/.wine/drive_c/users/$USER/`
+   - Lutris Prefixes: `~/Games/`
+   - Heroic Games Launcher: `~/.config/heroic/Prefixes/` and Flatpak `~/.var/app/com.heroicgameslauncher.hgl/`
+   - Bottles: `~/.var/app/com.usebottles.bottles/data/bottles/bottles/*/drive_c/users/*`
+
+4. **Console Emulators**:
+   - **Ryujinx / Eden (Nintendo Switch)**: `~/.config/Ryujinx/bis/user/save/`
+   - **RPCS3 (PlayStation 3)**: `~/.config/rpcs3/dev_hdd0/home/00000001/savedata/`
+   - **PCSX2 (PlayStation 2)**: `~/.config/PCSX2/memcards/`
+   - **Dolphin (GameCube & Wii)**: `~/.local/share/dolphin-emu/GC/` and `~/.local/share/dolphin-emu/Wii/`
+   - **DuckStation (PlayStation 1)**: `~/.local/share/duckstation/memcards/`
+
+---
+
+### Cross-Platform Compatibility (Windows & Linux)
+
+GameSaveVault provides full interoperability between Windows and Linux systems:
+
+- **Unified Snapshot Format**: Snapshots produced on Windows (`GameSaveVault.ps1`) and Linux (`gamevault.sh`) share the identical `manifest.json` schema and `payload/0001/...` structure. A vault snapshot created on Windows can be restored directly on Linux, and vice-versa.
+- **Portable Path Tokens**: Snapshots record locations using platform-independent tokens (`%DOCUMENTS%`, `%APPDATA%`, `%LOCALAPPDATA%`, `%LOCALLOW%`, `%SAVEDGAMES%`, `%USERPROFILE%`, `%STEAMUSERDATA%`). When restoring on Linux, GameSaveVault automatically translates these tokens into the active Proton prefix, Wine prefix, or native Linux directory.
+- **Shared Configuration**: Both operating systems read and update `config/settings.json` and `config/scan-database.json`.
+- **Safe Migration**: Migrate saves seamlessly from a Windows gaming desktop to a Linux laptop, Steam Deck, or Bazzite/ChimeraOS handheld by copying the vault directory.
+
+---
+
+<a id="commands"></a>
+## Windows Commands (PowerShell)
 
 | Command | What it does |
 |---|---|
@@ -627,34 +792,52 @@ powershell -ExecutionPolicy Bypass -File .\tests\selftest-rules.ps1
 
 ```
 GameSaveVault\
-  GameSaveVault.ps1              CLI entry point
-  GameSaveVault-GUI.ps1          WinForms app (PowerShell + System.Windows.Forms)
-  Install-GameSaveVault.ps1      one-line installer for the GitHub release
-  Install.ps1                    desktop/start-menu shortcut + optional task
-  Register-ScheduledBackup.ps1   daily backup task
-  modules\
-    GSV.Core.psm1                discovery, tokens, catalog, Windows.old scan
-    GSV.Vault.psm1               snapshot, restore, rollback, pruning
-  data\catalog.psd1              96 curated games and save paths
-  data\save-rules.schema.json    JSON Schema for config\save-rules.json
+  gamevault.sh                 Linux root executable launcher shim
+  GameSaveVault.ps1            Windows CLI entry point shim (backwards compatible)
+  GameSaveVault-GUI.ps1        Windows WinForms app launcher shim
+  Install-GameSaveVault.ps1    Windows one-line installer shim
+  Install.ps1                  Windows shortcut installer shim
+  Register-ScheduledBackup.ps1 Windows scheduled backup task shim
+  linux\                       Linux native implementation
+    gamevault.sh               Primary CLI dispatcher & dashboard launcher
+    modules\
+      common.sh                Environment, config, logging, tokens, JSON tools
+      scanner.sh               Proton, Flatpak, Wine, Lutris, Native, Emulator scanner
+      vault.sh                 Snapshots, restore, rollback, token translator
+      ui.sh                    Hybrid UI (Zenity GUI + Whiptail TUI + ANSI CLI)
+  windows\                     Windows PowerShell implementation
+    GameSaveVault.ps1          Main Windows CLI script
+    GameSaveVault-GUI.ps1      WinForms application
+    Install-GameSaveVault.ps1  Release installer
+    Install.ps1                Desktop & Start-menu shortcut installer
+    Register-ScheduledBackup.ps1 Scheduled backup task script
+  modules\                     Windows PowerShell modules
+    GSV.Core.psm1              Core discovery, catalog, and token utilities
+    GSV.Vault.psm1             Snapshot, restore, and rollback engine
+  data\catalog.psd1            96 curated games and save paths
+  data\title-names.json        Steam AppID and Switch TitleID name mapping database
+  data\save-rules.schema.json  JSON Schema for config\save-rules.json
   data\scan-database.schema.json JSON Schema for config\scan-database.json
-  config\settings.json           generated on first run (git-ignored)
-  config\settings.example.json   sample settings
-  config\scan-database.json      folders you chose + save locations found (git-ignored)
-  config\save-rules.json         your save rules (generated / editable)
+  config\settings.json         User settings (vault path, scan roots)
+  config\settings.example.json sample settings template
+  config\scan-database.json    folders you chose + save locations found (git-ignored)
+  config\save-rules.json       your save rules (generated / editable)
   config\save-rules.example.json seeded example rules
-  config\games.custom.json       generated when you add games
+  config\games.custom.json     custom games database
   tests\
-    selftest.ps1                 backup + restore round-trip
-    selftest-windowsold.ps1      Windows.old import + restore
-    selftest-newos.ps1           Steam AppId scan -> save -> restore to a new OS
-    selftest-deepscan.ps1        crack / Steam-emulator / UWP deep scan
-    selftest-emulators.ps1       console-emulator scan + migrate
-    selftest-formats.ps1         profile / verbatim / folder restore formats
-    selftest-rules.ps1           tokenize -> save -> discover -> new-PC restore -> import/export
-    selftest-scandb.ps1          choose folders -> scan database -> portable .gsvdb restore
+    test_linux_gamevault.sh    Comprehensive automated test suite for Linux
+    selftest-structure.ps1     Repository layout and cross-platform shim test
+    selftest.ps1               backup + restore round-trip
+    selftest-windowsold.ps1    Windows.old import + restore
+    selftest-newos.ps1         Steam AppId scan -> save -> restore to a new OS
+    selftest-deepscan.ps1      crack / Steam-emulator / UWP deep scan
+    selftest-emulators.ps1     console-emulator scan + migrate
+    selftest-formats.ps1       profile / verbatim / folder restore formats
+    selftest-rules.ps1         tokenize -> save -> discover -> new-PC restore -> import/export
+    selftest-scandb.ps1        choose folders -> scan database -> portable .gsvdb restore
   .gitignore
   LICENSE
+  README.md
 ```
 
 ---
@@ -669,11 +852,12 @@ Console emulator saves are keyed by a *title ID*, not a game name. GameSaveVault
 
 ## Linux, macOS and Wine
 
-GameSaveVault is built for **Windows PowerShell 5.1 + WinForms**. The vault format itself is platform-neutral (plain files, `config/scan-database.json`, portable `.gsvdb` zips), so a backup made on Windows can be restored anywhere.
+GameSaveVault offers native support for both **Linux** (`./gamevault.sh`) and **Windows** (`GameSaveVault.ps1`).
 
-- **Wine:** the CLI scripts can run under Wine with a Windows PowerShell install, and WinForms works in Wine with Mono/.NET. Expect to adapt the default paths (`%APPDATA%`, `%LOCALAPPDATA%`, drive letters) and skip the registry-related rules. The GUI has not been tested on Wine.
-- **Native Linux/macOS:** not supported today. A port would need a cross-platform discovery/backup layer (the current one is Windows-specific: drive letters, registry, WinForms). Contributions welcome — the data formats are documented and stable.
-- Practical workflow today: back up on Windows, copy the vault (or a `.gsvdb` file) to Linux, and restore the save folders manually into the Wine prefix or native emulator data directory.
+- **Linux**: Native Bash implementation (`./gamevault.sh`) with auto-detecting Hybrid UI (Zenity GUI, Whiptail TUI, and ANSI CLI fallback), automated discovery for Steam Proton prefixes (Native & Flatpak), Wine, Lutris, Heroic Games Launcher, Bottles, console emulators, and native Linux saves. Full details in [Linux Quick Start & Usage](#linux-quick-start--usage).
+- **Wine / Proton**: Games running inside Wine and Proton prefixes are automatically discovered and backed up by the Linux scanner. The Windows PowerShell scripts can also run under Wine if desired.
+- **macOS**: Experimental. Vault snapshots, `manifest.json`, and `config/scan-database.json` are platform-neutral, so backups can be inspected or extracted manually on macOS.
+- **Cross-Platform Compatibility**: Snapshots created on Windows can be restored directly on Linux, and vice-versa. Canonical path tokens (`%DOCUMENTS%`, `%APPDATA%`, etc.) are dynamically translated to destination platform paths during restore with full rollback protection.
 
 ---
 
