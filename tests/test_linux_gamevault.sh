@@ -102,6 +102,12 @@ if [ -f "$SCANNER_SH" ]; then
     source "$SCANNER_SH"
 fi
 
+VAULT_SH="$REPO_ROOT/linux/modules/vault.sh"
+if [ -f "$VAULT_SH" ]; then
+    # shellcheck source=../linux/modules/vault.sh
+    source "$VAULT_SH"
+fi
+
 # ==============================================================================
 # Unit Tests: common.sh
 # ==============================================================================
@@ -806,6 +812,276 @@ test_scan_all() {
 }
 
 # ==============================================================================
+# Unit Tests: vault.sh (Task 4)
+# ==============================================================================
+
+test_vault_create_snapshot() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_1"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_1"
+    mkdir -p "$mock_saves/HollowKnight"
+    mkdir -p "$mock_saves/EldenRing"
+    echo "hk_save_content_12345" > "$mock_saves/HollowKnight/user1.dat"
+    echo "er_save_content_67890" > "$mock_saves/EldenRing/ER0000.sl2"
+
+    local locs='[
+      {
+        "Game": "Hollow Knight",
+        "Source": "Native",
+        "OriginalPath": "'"$mock_saves/HollowKnight"'",
+        "TokenPath": "%XDG_DATA_HOME%/HollowKnight"
+      },
+      {
+        "Game": "Elden Ring",
+        "Source": "SteamProton",
+        "OriginalPath": "'"$mock_saves/EldenRing"'",
+        "TokenPath": "%APPDATA%/EldenRing"
+      }
+    ]'
+
+    gsv_create_snapshot "$locs" 0 "test-backup" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "gsv_create_snapshot returned success"
+
+    assert_true "[ -d '$mock_vault/snapshots' ]" "Snapshots directory was created"
+
+    local snap_dirs=("$mock_vault/snapshots"/*)
+    assert_equals "1" "${#snap_dirs[@]}" "Exactly one snapshot directory created"
+
+    local snap_dir="${snap_dirs[0]}"
+    local manifest="$snap_dir/manifest.json"
+    assert_true "[ -f '$manifest' ]" "manifest.json exists in snapshot"
+
+    # Verify manifest JSON schema
+    local platform label total_games total_files total_bytes
+    platform="$(gsv_json_get "$manifest" ".Platform")"
+    label="$(gsv_json_get "$manifest" ".Label")"
+    total_games="$(gsv_json_get "$manifest" ".TotalGames")"
+    total_files="$(gsv_json_get "$manifest" ".TotalFiles")"
+    total_bytes="$(gsv_json_get "$manifest" ".TotalBytes")"
+
+    assert_equals "Linux" "$platform" "Manifest Platform is Linux"
+    assert_equals "test-backup" "$label" "Manifest Label is test-backup"
+    assert_equals "2" "$total_games" "TotalGames is 2"
+    assert_equals "2" "$total_files" "TotalFiles is 2"
+    assert_true "[ '$total_bytes' -gt 0 ]" "TotalBytes is greater than 0"
+
+    # Verify copied data files
+    assert_true "[ -f '$snap_dir/data/Hollow Knight/user1.dat' ]" "Hollow Knight save file copied"
+    assert_true "[ -f '$snap_dir/data/Elden Ring/ER0000.sl2' ]" "Elden Ring save file copied"
+    local content_hk
+    content_hk="$(cat "$snap_dir/data/Hollow Knight/user1.dat")"
+    assert_equals "hk_save_content_12345" "$content_hk" "Hollow Knight save data matches"
+
+    # Verify entries in manifest
+    local entry0_game entry0_token
+    entry0_game="$(gsv_json_get "$manifest" ".Entries[0].Game")"
+    entry0_token="$(gsv_json_get "$manifest" ".Entries[0].TokenPath")"
+    assert_true "[ -n '$entry0_game' ]" "First entry has Game"
+    assert_true "[ -n '$entry0_token' ]" "First entry has TokenPath"
+}
+
+test_vault_create_snapshot_from_file() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_file"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_file"
+    mkdir -p "$mock_saves/Celeste"
+    echo "celeste_data" > "$mock_saves/Celeste/0.celeste"
+
+    local loc_file="$TEST_TMP_DIR/locs_input.json"
+    cat <<EOF > "$loc_file"
+[
+  {
+    "GameName": "Celeste",
+    "Source": "Native",
+    "ResolvedPath": "$mock_saves/Celeste",
+    "Token": "XDG_DATA_HOME"
+  }
+]
+EOF
+
+    gsv_create_snapshot "$loc_file" 0 "file-backup" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "gsv_create_snapshot with file input returned success"
+
+    local snap_dirs=("$mock_vault/snapshots"/*)
+    assert_equals "1" "${#snap_dirs[@]}" "Snapshot directory created from file"
+    assert_true "[ -f '${snap_dirs[0]}/data/Celeste/0.celeste' ]" "Celeste save file copied"
+}
+
+test_vault_dry_run_backup() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_dry"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_dry"
+    mkdir -p "$mock_saves/Doom"
+    echo "doom_data" > "$mock_saves/Doom/doom.sav"
+
+    local locs='[
+      {
+        "Game": "Doom",
+        "Source": "Native",
+        "OriginalPath": "'"$mock_saves/Doom"'"
+      }
+    ]'
+
+    gsv_create_snapshot "$locs" 1 "dry-backup" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "gsv_create_snapshot dry-run returns success"
+    assert_true "[ ! -d '$mock_vault/snapshots' ]" "No snapshots folder created during dry-run"
+}
+
+test_vault_list_and_resolve_snapshots() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_list"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_list"
+    mkdir -p "$mock_saves/Game1"
+    echo "data1" > "$mock_saves/Game1/save1.dat"
+
+    local locs='[{"Game": "Game1", "OriginalPath": "'"$mock_saves/Game1"'"}]'
+    gsv_create_snapshot "$locs" 0 "snap1" "$mock_vault"
+    sleep 1
+    gsv_create_snapshot "$locs" 0 "snap2" "$mock_vault"
+
+    local table_out
+    table_out="$(gsv_list_snapshots "$mock_vault")"
+    assert_match "snap1" "$table_out" "Table output contains snap1"
+    assert_match "snap2" "$table_out" "Table output contains snap2"
+
+    local json_out
+    json_out="$(gsv_list_snapshots "$mock_vault" --json)"
+    local json_len
+    json_len="$(echo "$json_out" | jq 'length')"
+    assert_equals "2" "$json_len" "JSON output has 2 snapshots"
+
+    local latest_dir
+    latest_dir="$(gsv_resolve_snapshot_dir "latest" "$mock_vault")"
+    assert_true "[ -d '$latest_dir' ]" "Resolved latest snapshot dir exists"
+    assert_match "snap2" "$(cat "$latest_dir/manifest.json")" "Latest snapshot matches newest snap2"
+
+    local resolved_explicit
+    local snap_id
+    snap_id="$(basename "$latest_dir")"
+    resolved_explicit="$(gsv_resolve_snapshot_dir "$snap_id" "$mock_vault")"
+    assert_equals "$latest_dir" "$resolved_explicit" "Explicit snapshot ID matches"
+}
+
+test_vault_restore_snapshot() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_rest"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_rest"
+    local restore_dest="$TEST_TMP_DIR/mock_restore_dest"
+    mkdir -p "$mock_saves/GameA"
+    mkdir -p "$mock_saves/GameB"
+    echo "saveA_content" > "$mock_saves/GameA/a.sav"
+    echo "saveB_content" > "$mock_saves/GameB/b.sav"
+
+    local locs='[
+      {"Game": "GameA", "OriginalPath": "'"$mock_saves/GameA"'"},
+      {"Game": "GameB", "OriginalPath": "'"$mock_saves/GameB"'"}
+    ]'
+    gsv_create_snapshot "$locs" 0 "backup-for-restore" "$mock_vault"
+
+    # Selective restore GameA only
+    gsv_restore_snapshot "latest" "GameA" 0 "$restore_dest" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "gsv_restore_snapshot succeeded"
+    assert_true "[ -f '$restore_dest/GameA/a.sav' ]" "GameA restored to restore_root"
+    assert_equals "saveA_content" "$(cat "$restore_dest/GameA/a.sav")" "Restored file content matches"
+    assert_true "[ ! -e '$restore_dest/GameB' ]" "GameB not restored due to selective filter"
+}
+
+test_vault_restore_token_path() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_tok"
+    local orig_home="$HOME"
+    local mock_home="$TEST_TMP_DIR/mock_home_restore"
+    mkdir -p "$mock_home/.local/share/NativeGame"
+    echo "original_native_data" > "$mock_home/.local/share/NativeGame/save.sav"
+    HOME="$mock_home"
+    export XDG_DATA_HOME="$mock_home/.local/share"
+
+    local locs='[
+      {"Game": "NativeGame", "OriginalPath": "'"$mock_home/.local/share/NativeGame"'", "TokenPath": "%XDG_DATA_HOME%/NativeGame"}
+    ]'
+    gsv_create_snapshot "$locs" 0 "token-backup" "$mock_vault"
+
+    # Delete original
+    rm -rf "$mock_home/.local/share/NativeGame"
+    assert_true "[ ! -d '$mock_home/.local/share/NativeGame' ]" "Original game folder removed"
+
+    # Restore without restore_root -> resolves via %XDG_DATA_HOME%
+    gsv_restore_snapshot "latest" "NativeGame" 0 "" "$mock_vault"
+    assert_true "[ -f '$mock_home/.local/share/NativeGame/save.sav' ]" "Restored to token destination"
+    assert_equals "original_native_data" "$(cat "$mock_home/.local/share/NativeGame/save.sav")" "Restored token content matches"
+
+    HOME="$orig_home"
+    unset XDG_DATA_HOME
+}
+
+test_vault_rollback_collision_protection() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_rb"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_rb"
+    local restore_dest="$TEST_TMP_DIR/mock_restore_rb"
+    mkdir -p "$mock_saves/GameC"
+    echo "snapshot_version_c" > "$mock_saves/GameC/save.dat"
+
+    local locs='[{"Game": "GameC", "OriginalPath": "'"$mock_saves/GameC"'"}]'
+    gsv_create_snapshot "$locs" 0 "rb-backup" "$mock_vault"
+
+    # Pre-populate restore destination with conflicting data
+    mkdir -p "$restore_dest/GameC"
+    echo "conflicting_local_data" > "$restore_dest/GameC/save.dat"
+
+    gsv_restore_snapshot "latest" "GameC" 0 "$restore_dest" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "Restore succeeded despite collision"
+
+    # Verify destination received restored snapshot version
+    assert_equals "snapshot_version_c" "$(cat "$restore_dest/GameC/save.dat")" "Target destination has restored snapshot file"
+
+    # Verify conflicting data was preserved in rollback
+    assert_true "[ -d '$mock_vault/rollback' ]" "Rollback directory created"
+    local rb_files
+    rb_files="$(find "$mock_vault/rollback" -type f -name "save.dat")"
+    assert_true "[ -n '$rb_files' ]" "Conflicting file found in rollback directory"
+    local rb_content
+    rb_content="$(cat $rb_files)"
+    assert_equals "conflicting_local_data" "$rb_content" "Rollback preserved conflicting local data"
+}
+
+test_vault_dry_run_restore() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_dry_rest"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_dry_rest"
+    local restore_dest="$TEST_TMP_DIR/mock_restore_dry_dest"
+    mkdir -p "$mock_saves/GameD"
+    echo "snapshot_d" > "$mock_saves/GameD/d.sav"
+
+    local locs='[{"Game": "GameD", "OriginalPath": "'"$mock_saves/GameD"'"}]'
+    gsv_create_snapshot "$locs" 0 "dry-restore-snap" "$mock_vault"
+
+    # Pre-populate target
+    mkdir -p "$restore_dest/GameD"
+    echo "untouched_data" > "$restore_dest/GameD/d.sav"
+
+    gsv_restore_snapshot "latest" "GameD" 1 "$restore_dest" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "Dry run restore returned success"
+
+    assert_equals "untouched_data" "$(cat "$restore_dest/GameD/d.sav")" "Destination data untouched in dry run"
+    assert_true "[ ! -d '$mock_vault/rollback' ]" "No rollback directory created during dry run"
+}
+
+test_vault_restore_zero_matching_games() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_zero"
+    local mock_saves="$TEST_TMP_DIR/mock_saves_zero"
+    local restore_dest="$TEST_TMP_DIR/mock_restore_zero"
+    mkdir -p "$mock_saves/GameE"
+    echo "snap_e" > "$mock_saves/GameE/e.sav"
+
+    local locs='[{"Game": "GameE", "OriginalPath": "'"$mock_saves/GameE"'"}]'
+    gsv_create_snapshot "$locs" 0 "zero-match-snap" "$mock_vault"
+
+    gsv_restore_snapshot "latest" "NonExistentGameX,NonExistentGameY" 0 "$restore_dest" "$mock_vault"
+    local status=$?
+    assert_equals "0" "$status" "Restore with 0 matching games exits cleanly with status 0"
+    assert_true "[ ! -d '$restore_dest/GameE' ]" "Nothing was restored"
+}
+
+# ==============================================================================
 # Runner
 # ==============================================================================
 echo -e "${BLUE}=== Running Linux GameSaveVault Test Suite ===${NC}"
@@ -829,6 +1105,16 @@ run_test test_scan_emulators "Scan emulator save paths (gsv_scan_emulators)"
 run_test test_deep_scan_folder "Deep scan custom folder for save extensions (gsv_deep_scan_folder)"
 run_test test_update_scan_database "Update scan database JSON and schema compliance (gsv_update_scan_database)"
 run_test test_scan_all "Aggregate all scans (gsv_scan_all)"
+
+run_test test_vault_create_snapshot "Create snapshot with manifest and copied saves (gsv_create_snapshot)"
+run_test test_vault_create_snapshot_from_file "Create snapshot from file input (gsv_create_snapshot)"
+run_test test_vault_dry_run_backup "Dry run backup creates no files (gsv_create_snapshot)"
+run_test test_vault_list_and_resolve_snapshots "List and resolve snapshots (gsv_list_snapshots / gsv_resolve_snapshot_dir)"
+run_test test_vault_restore_snapshot "Restore snapshot with selective filtering (gsv_restore_snapshot)"
+run_test test_vault_restore_token_path "Restore snapshot using token path resolution (gsv_restore_snapshot)"
+run_test test_vault_rollback_collision_protection "Rollback safety preserves conflicting destination (gsv_restore_snapshot)"
+run_test test_vault_dry_run_restore "Dry run restore makes no modifications (gsv_restore_snapshot)"
+run_test test_vault_restore_zero_matching_games "Restore with 0 matching games exits cleanly (gsv_restore_snapshot)"
 
 echo
 echo -e "${BLUE}=== Test Summary ===${NC}"
