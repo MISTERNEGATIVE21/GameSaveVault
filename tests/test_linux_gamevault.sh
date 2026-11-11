@@ -110,6 +110,9 @@ test_json_get_jq() {
   "numberKey": 42,
   "boolKey": true,
   "nullKey": null,
+  "Game Title": {
+    "save": "elden_ring_save"
+  },
   "nested": {
     "child": "deep_value"
   },
@@ -130,6 +133,9 @@ EOF
     val="$(gsv_json_get "$sample" ".nested.child")"
     assert_equals "deep_value" "$val" "gsv_json_get nested key"
 
+    val="$(gsv_json_get "$sample" '.["Game Title"].save')"
+    assert_equals "elden_ring_save" "$val" "gsv_json_get bracket quoted key with space"
+
     val="$(gsv_json_get "$sample" ".arrayKey[0]")"
     assert_equals "item1" "$val" "gsv_json_get array index"
 
@@ -145,8 +151,12 @@ test_json_get_python() {
   "stringKey": "python test",
   "numberKey": 99,
   "boolKey": false,
+  "Elden Ring": {
+    "save": "py_elden_save"
+  },
   "nested": {
-    "child": "py_child"
+    "child": "py_child",
+    "spaced key": "spaced_val"
   },
   "arrayKey": ["alpha", "beta"]
 }
@@ -164,6 +174,12 @@ EOF
 
     val="$(gsv_json_get "$sample" ".nested.child")"
     assert_equals "py_child" "$val" "py fallback nested key"
+
+    val="$(gsv_json_get "$sample" '.["Elden Ring"].save')"
+    assert_equals "py_elden_save" "$val" "py fallback double bracket quoted key with space"
+
+    val="$(gsv_json_get "$sample" ".nested[\"spaced key\"]")"
+    assert_equals "spaced_val" "$val" "py fallback nested bracket quoted key with space"
 
     val="$(gsv_json_get "$sample" ".arrayKey[1]")"
     assert_equals "beta" "$val" "py fallback array index"
@@ -240,16 +256,27 @@ test_vault_resolution_order() {
     res="$(gsv_resolve_vault_path "~/custom_vault")"
     assert_equals "$HOME/custom_vault" "$res" "Override tilde expansion"
 
-    # 2. Mounted external drive takes 2nd priority
+    # 2. Mounted external drive takes 2nd priority (must be writable)
     local mock_mount="$TEST_TMP_DIR/mock_media/drive1/GameSaveVault"
     mkdir -p "$mock_mount"
     local GSV_MOUNT_ROOTS=("$TEST_TMP_DIR/mock_media")
     res="$(gsv_resolve_vault_path "")"
     assert_equals "$mock_mount" "$res" "Mounted drive priority 2"
 
+    # Writable check: read-only external drive is skipped
+    local ro_mount="$TEST_TMP_DIR/mock_ro_media/drive2/GameSaveVault"
+    mkdir -p "$ro_mount"
+    chmod 555 "$ro_mount"
+    GSV_MOUNT_ROOTS=("$TEST_TMP_DIR/mock_ro_media")
+    res="$(gsv_resolve_vault_path "")"
+    # Should skip the read-only drive and fall through to default ~/GameSaveVault
+    assert_equals "$HOME/GameSaveVault" "$res" "Read-only mounted drive is skipped"
+    chmod 755 "$ro_mount"
+    rm -rf "$TEST_TMP_DIR/mock_ro_media"
+
     # Remove mock external drive
     rm -rf "$TEST_TMP_DIR/mock_media"
-    GSV_MOUNT_ROOTS=()
+    unset GSV_MOUNT_ROOTS
 
     # 3. Settings.json BackupRoot takes 3rd priority
     local mock_config="$TEST_TMP_DIR/config"
@@ -260,6 +287,11 @@ test_vault_resolution_order() {
 
     res="$(gsv_resolve_vault_path "")"
     assert_equals "$TEST_TMP_DIR/settings_vault" "$res" "Settings BackupRoot priority 3"
+
+    # Settings BackupRoot pointing to missing/unmounted/unwritable drive falls back to ~/GameSaveVault
+    echo '{"BackupRoot": "/mnt/missing_unmounted_drive/GameSaveVault"}' > "$mock_config/settings.json"
+    res="$(gsv_resolve_vault_path "")"
+    assert_equals "$HOME/GameSaveVault" "$res" "Unmounted/missing BackupRoot falls back to default"
 
     # 4. Default ~/GameSaveVault when settings empty or Windows-formatted
     echo '{"BackupRoot": "D:\\GameSaveVault"}' > "$mock_config/settings.json"
@@ -304,14 +336,32 @@ test_token_mapping_roundtrip() {
     rev3="$(gsv_token_to_path "$tok3" "$mock_prefix")"
     assert_equals "$path3" "$rev3" "Round-trip AppData/LocalLow"
 
-    # Documents/My Games
+    # Documents/My Games (preserves whatever follows Documents/)
     local path4="$mock_prefix/Documents/My Games/Skyrim Special Edition/Saves"
     local tok4
     tok4="$(gsv_path_to_token "$path4")"
-    assert_equals "%DOCUMENTS%/Skyrim Special Edition/Saves" "$tok4" "Token Documents/My Games"
+    assert_equals "%DOCUMENTS%/My Games/Skyrim Special Edition/Saves" "$tok4" "Token Documents/My Games"
     local rev4
     rev4="$(gsv_token_to_path "$tok4" "$mock_prefix")"
     assert_equals "$path4" "$rev4" "Round-trip Documents/My Games"
+
+    # Documents publisher path (without My Games, e.g. Witcher 3, GTA V)
+    local path4b="$mock_prefix/Documents/The Witcher 3/gamesaves"
+    local tok4b
+    tok4b="$(gsv_path_to_token "$path4b")"
+    assert_equals "%DOCUMENTS%/The Witcher 3/gamesaves" "$tok4b" "Token Documents without My Games"
+    local rev4b
+    rev4b="$(gsv_token_to_path "$tok4b" "$mock_prefix")"
+    assert_equals "$path4b" "$rev4b" "Round-trip Documents without My Games"
+
+    # UserProfile fallback in Wine/Proton prefixes
+    local path_prof="$mock_prefix/custom_saves/slot0.sav"
+    local tok_prof
+    tok_prof="$(gsv_path_to_token "$path_prof")"
+    assert_equals "%USERPROFILE%/custom_saves/slot0.sav" "$tok_prof" "Token USERPROFILE"
+    local rev_prof
+    rev_prof="$(gsv_token_to_path "$tok_prof" "$mock_prefix")"
+    assert_equals "$path_prof" "$rev_prof" "Round-trip USERPROFILE"
 
     # Saved Games
     local path5="$mock_prefix/Saved Games/CD Projekt Red/Cyberpunk 2077"
@@ -381,6 +431,9 @@ test_logging_helpers() {
     GSV_FORCE_COLOR=0
 
     local log_out
+    log_out="$(gsv_log)"
+    assert_match "\[INFO\]" "$log_out" "gsv_log with 0 arguments"
+
     log_out="$(gsv_log_info "Test information message")"
     assert_match "\[INFO\] Test information message" "$log_out" "gsv_log_info stdout"
 

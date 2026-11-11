@@ -102,20 +102,31 @@ except Exception:
     print("null")
     sys.exit(0)
 
+pattern = re.compile(r"""
+    \["([^"]+)"\]         | # 1: ["double quoted"]
+    \x27?\[\x27([^\x27]+)\x27\]| # 2: [\x27single quoted\x27]
+    \[([0-9]+)\]          | # 3: [0] array index
+    (\[\])                | # 4: [] array spread
+    \.?"([^"]+)"          | # 5: ."double quoted"
+    \.?\x27([^\x27]+)\x27 | # 6: .\x27single quoted\x27
+    \.?([a-zA-Z0-9_\-]+)    # 7: .standard_key
+""", re.VERBOSE)
+
 def eval_filter(data, expr):
     expr = expr.strip()
     if not expr or expr == ".":
         return data
-    tokens = re.findall(r"\.?([a-zA-Z0-9_\-]+)|\[([0-9]+)\]|\[\]", expr)
     curr = data
-    for prop, idx in tokens:
+    for m in pattern.finditer(expr):
+        g1, g2, g3, g4, g5, g6, g7 = m.groups()
+        prop = g1 or g2 or g5 or g6 or g7
         if prop:
             if isinstance(curr, dict) and prop in curr:
                 curr = curr[prop]
             else:
                 return None
-        elif idx:
-            i = int(idx)
+        elif g3 is not None:
+            i = int(g3)
             if isinstance(curr, list) and 0 <= i < len(curr):
                 curr = curr[i]
             else:
@@ -266,13 +277,19 @@ gsv_resolve_vault_path() {
 
     # 2. Mounted external drive containing GameSaveVault/
     local user_name="${USER:-$(id -un 2>/dev/null || echo "user")}"
-    local mount_roots=("${GSV_MOUNT_ROOTS[@]:-/run/media/$user_name /media/$user_name /mnt}")
+    local mount_roots
+    if [ -n "${GSV_MOUNT_ROOTS+x}" ] && [ ${#GSV_MOUNT_ROOTS[@]} -gt 0 ]; then
+        mount_roots=("${GSV_MOUNT_ROOTS[@]}")
+    else
+        mount_roots=("/run/media/$user_name" "/media/$user_name" "/mnt")
+    fi
+
     local root_candidate
     for root_candidate in "${mount_roots[@]}"; do
         if [ -d "$root_candidate" ]; then
             local drive
             for drive in "$root_candidate"/*; do
-                if [ -d "$drive/GameSaveVault" ]; then
+                if [ -d "$drive/GameSaveVault" ] && [ -w "$drive/GameSaveVault" ]; then
                     GSV_VAULT_PATH="$drive/GameSaveVault"
                     echo "$drive/GameSaveVault"
                     return 0
@@ -290,9 +307,32 @@ gsv_resolve_vault_path() {
             # Ignore Windows paths with drive letters (e.g. D:\...)
             if [[ ! "$backup_root" =~ ^[a-zA-Z]: ]]; then
                 backup_root="${backup_root/#\~/$HOME}"
-                GSV_VAULT_PATH="$backup_root"
-                echo "$backup_root"
-                return 0
+                # Check if backup_root is usable (writable directory or writable parent)
+                local is_usable=0
+                if [ -e "$backup_root" ]; then
+                    if [ -d "$backup_root" ] && [ -w "$backup_root" ]; then
+                        is_usable=1
+                    fi
+                else
+                    local parent="$backup_root"
+                    while [ -n "$parent" ] && [ "$parent" != "/" ] && [ "$parent" != "." ]; do
+                        parent="$(dirname "$parent")"
+                        if [ -e "$parent" ]; then
+                            if [ -d "$parent" ] && [ -w "$parent" ]; then
+                                is_usable=1
+                            fi
+                            break
+                        fi
+                    done
+                fi
+
+                if [ $is_usable -eq 1 ]; then
+                    GSV_VAULT_PATH="$backup_root"
+                    echo "$backup_root"
+                    return 0
+                else
+                    gsv_log_warn "Configured BackupRoot '$backup_root' is missing or not writable; falling back to default vault." >&2
+                fi
             fi
         fi
     fi
@@ -343,7 +383,7 @@ gsv_path_to_token() {
         return 0
     fi
 
-    if [[ "$p" =~ [Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt][Ss]/[Mm][Yy]\ [Gg][Aa][Mm][Ee][Ss](/(.*))?$ ]]; then
+    if [[ "$p" =~ [Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt][Ss](/(.*))?$ ]]; then
         local rel="${BASH_REMATCH[2]:-}"
         [ -n "$rel" ] && echo "%DOCUMENTS%/$rel" || echo "%DOCUMENTS%"
         return 0
@@ -352,6 +392,13 @@ gsv_path_to_token() {
     if [[ "$p" =~ [Ss][Aa][Vv][Ee][Dd]\ [Gg][Aa][Mm][Ee][Ss](/(.*))?$ ]]; then
         local rel="${BASH_REMATCH[2]:-}"
         [ -n "$rel" ] && echo "%SAVEDGAMES%/$rel" || echo "%SAVEDGAMES%"
+        return 0
+    fi
+
+    # Wine/Proton user profile root fallback (e.g. drive_c/users/<user>/...)
+    if [[ "$p" =~ [Dd][Rr][Ii][Vv][Ee]_[Cc]/[Uu][Ss][Ee][Rr][Ss]/[^/]+(/(.*))?$ ]]; then
+        local rel="${BASH_REMATCH[2]:-}"
+        [ -n "$rel" ] && echo "%USERPROFILE%/$rel" || echo "%USERPROFILE%"
         return 0
     fi
 
@@ -438,15 +485,17 @@ gsv_token_to_path() {
             fi
             ;;
         DOCUMENTS)
-            # Avoid repeating "My Games" if already in rel
-            if [[ "$rel" =~ ^[Mm][Yy]\ [Gg][Aa][Mm][Ee][Ss](/(.*))?$ ]]; then
-                rel="${BASH_REMATCH[2]:-}"
-            fi
             if [ -n "$prefix" ]; then
-                base="$prefix/Documents/My Games"
+                base="$prefix/Documents"
             else
-                local doc_dir="${XDG_DOCUMENTS_DIR:-$HOME/Documents}"
-                base="$doc_dir/My Games"
+                base="${XDG_DOCUMENTS_DIR:-$HOME/Documents}"
+            fi
+            ;;
+        USERPROFILE)
+            if [ -n "$prefix" ]; then
+                base="$prefix"
+            else
+                base="$HOME"
             fi
             ;;
         SAVEDGAMES)
@@ -505,7 +554,7 @@ gsv_token_to_path() {
 # to <vault>/logs/gamevault.log when vault path is resolved.
 gsv_log() {
     local level="${1:-INFO}"
-    shift
+    [ $# -gt 0 ] && shift
     local msg="$*"
     local timestamp
     timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
