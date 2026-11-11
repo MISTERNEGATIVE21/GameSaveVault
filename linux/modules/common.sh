@@ -452,8 +452,8 @@ gsv_token_to_path() {
 
     local token_name=""
     local rel=""
-    if [[ "$tok" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
-        token_name="${BASH_REMATCH[1]}"
+    if [[ "$tok" =~ ^%([A-Za-z0-9_]+)%(/(.*))?$ ]]; then
+        token_name="${BASH_REMATCH[1]^^}"
         rel="${BASH_REMATCH[3]:-}"
     else
         # Not a token path, return as-is
@@ -463,28 +463,28 @@ gsv_token_to_path() {
 
     local base=""
     case "$token_name" in
-        APPDATA)
+        APPDATA|APPDATAROAMING)
             if [ -n "$prefix" ]; then
                 base="$prefix/AppData/Roaming"
             else
                 base="${XDG_CONFIG_HOME:-$HOME/.config}"
             fi
             ;;
-        LOCALAPPDATA)
+        LOCALAPPDATA|APPDATALOCAL)
             if [ -n "$prefix" ]; then
                 base="$prefix/AppData/Local"
             else
                 base="${XDG_DATA_HOME:-$HOME/.local/share}"
             fi
             ;;
-        LOCALLOW)
+        LOCALLOW|APPDATALOCALLOW)
             if [ -n "$prefix" ]; then
                 base="$prefix/AppData/LocalLow"
             else
                 base="${XDG_DATA_HOME:-$HOME/.local/share}"
             fi
             ;;
-        DOCUMENTS)
+        DOCUMENTS|MYDOCUMENTS)
             if [ -n "$prefix" ]; then
                 base="$prefix/Documents"
             else

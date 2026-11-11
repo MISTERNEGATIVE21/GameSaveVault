@@ -171,7 +171,7 @@ cmd_scan_folders() {
     fi
 
     local -a raw_paths=()
-    IFS=':;, ' read -r -a raw_paths <<< "$dirs_arg"
+    IFS=':;' read -r -a raw_paths <<< "$dirs_arg"
 
     local -a valid_paths=()
     for p in "${raw_paths[@]}"; do

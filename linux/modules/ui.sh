@@ -888,7 +888,7 @@ _gsv_ui_action_restore() {
             if [ -n "$sid" ]; then
                 menu_items+=("$sid" "[$dt] $lbl ($gcount games)")
             fi
-        done < <(echo "$snaps_json" | jq -r '.[] | "\(.Id // .SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // "")\t\(.TotalGames // (.Games | length) // 0)"' 2>/dev/null)
+        done < <(echo "$snaps_json" | jq -r '.[] | "\(.Id // .SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // .CreatedUtc // "")\t\(.TotalGames // .EntryCount // (.Games | length) // 0)"' 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         while IFS=$'\t' read -r sid lbl dt gcount; do
             if [ -n "$sid" ]; then
@@ -900,8 +900,10 @@ try:
     for s in json.loads(sys.argv[1]):
         sid = s.get("Id") or s.get("SnapshotId") or ""
         lbl = s.get("Label") or "no-label"
-        dt = s.get("CreatedAt") or ""
+        dt = s.get("CreatedAt") or s.get("CreatedUtc") or ""
         tg = s.get("TotalGames")
+        if tg is None:
+            tg = s.get("EntryCount")
         if tg is None:
             tg = len(s.get("Games", []))
         print(f"{sid}\t{lbl}\t{dt}\t{tg}")
@@ -930,7 +932,7 @@ except Exception:
             if [ -n "$gname" ]; then
                 game_checklist+=("$gname" "$orig" "ON")
             fi
-        done < <(jq -r '(.Entries // .Games // [])[] | "\(.Game)\t\(.OriginalPath // "")"' "$manifest" 2>/dev/null)
+        done < <(jq -r '(.Entries // .Games // [])[] | "\((.Game // .GameName // .GameId // "Unknown"))\t\(.OriginalPath // .ResolvedPath // .AbsolutePath // "")"' "$manifest" 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         while IFS=$'\t' read -r gname orig; do
             if [ -n "$gname" ]; then
@@ -943,8 +945,8 @@ try:
         mf = json.load(f)
     entries = mf.get("Entries") or mf.get("Games") or []
     for g in entries:
-        gn = g.get("Game") or "Unknown"
-        op = g.get("OriginalPath") or ""
+        gn = g.get("Game") or g.get("GameName") or g.get("GameId") or "Unknown"
+        op = g.get("OriginalPath") or g.get("ResolvedPath") or g.get("AbsolutePath") or ""
         print(f"{gn}\t{op}")
 except Exception:
     pass
@@ -1007,7 +1009,7 @@ _gsv_ui_action_browse_snapshots() {
             if [ -n "$sid" ]; then
                 menu_items+=("$sid" "[$dt] $lbl ($gcount games)")
             fi
-        done < <(echo "$snaps_json" | jq -r '.[] | "\(.Id // .SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // "")\t\(.TotalGames // (.Games | length) // 0)"' 2>/dev/null)
+        done < <(echo "$snaps_json" | jq -r '.[] | "\(.Id // .SnapshotId)\t\(.Label // "no-label")\t\(.CreatedAt // .CreatedUtc // "")\t\(.TotalGames // .EntryCount // (.Games | length) // 0)"' 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         while IFS=$'\t' read -r sid lbl dt gcount; do
             if [ -n "$sid" ]; then
@@ -1019,8 +1021,10 @@ try:
     for s in json.loads(sys.argv[1]):
         sid = s.get("Id") or s.get("SnapshotId") or ""
         lbl = s.get("Label") or "no-label"
-        dt = s.get("CreatedAt") or ""
+        dt = s.get("CreatedAt") or s.get("CreatedUtc") or ""
         tg = s.get("TotalGames")
+        if tg is None:
+            tg = s.get("EntryCount")
         if tg is None:
             tg = len(s.get("Games", []))
         print(f"{sid}\t{lbl}\t{dt}\t{tg}")
@@ -1044,7 +1048,7 @@ except Exception:
     local details="Snapshot: $sid\n"
     if [ -f "$mf" ]; then
         if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
-            details+="$(jq -r '"Label: \(.Label // "none")\nCreated: \(.CreatedAt // "unknown")\nTotal Files: \(.TotalFiles // 0)\nTotal Size: \(.TotalBytes // .TotalSizeBytes // 0) bytes\nGames:\n" + ([(.Entries // .Games // [])[].Game] | map("  - " + .) | join("\n"))' "$mf" 2>/dev/null)"
+            details+="$(jq -r '"Label: \(.Label // "none")\nCreated: \(.CreatedAt // .CreatedUtc // "unknown")\nTotal Files: \(.TotalFiles // 0)\nTotal Size: \(.TotalBytes // .TotalSizeBytes // 0) bytes\nGames:\n" + ([(.Entries // .Games // [])[] | (.Game // .GameName // .GameId // "Unknown")] | map("  - " + .) | join("\n"))' "$mf" 2>/dev/null)"
         elif command -v python3 >/dev/null 2>&1; then
             details+="$(python3 -c '
 import sys, json
@@ -1056,7 +1060,7 @@ try:
         tb = d.get("TotalSizeBytes", 0)
     entries = d.get("Entries") or d.get("Games") or []
     lbl = d.get("Label") or "none"
-    crt = d.get("CreatedAt") or "unknown"
+    crt = d.get("CreatedAt") or d.get("CreatedUtc") or "unknown"
     tf = d.get("TotalFiles", 0)
     print(f"Label: {lbl}")
     print(f"Created: {crt}")
@@ -1064,7 +1068,7 @@ try:
     print(f"Total Size: {tb} bytes")
     print("Games:")
     for g in entries:
-        gn = g.get("Game") or "Unknown"
+        gn = g.get("Game") or g.get("GameName") or g.get("GameId") or "Unknown"
         print(f"  - {gn}")
 except Exception as e:
     print(str(e))

@@ -42,7 +42,9 @@ foreach ($f in $expectedWindowsFiles) {
 # 3. Check root shims exist
 $expectedRootShims = @(
     'GameSaveVault.ps1',
-    'GameSaveVault-GUI.ps1'
+    'GameSaveVault-GUI.ps1',
+    'Install.ps1',
+    'Install-GameSaveVault.ps1'
 )
 
 foreach ($f in $expectedRootShims) {
@@ -89,6 +91,20 @@ if (Test-Path -LiteralPath $rootCli) {
     } catch {
         Assert-Condition $false "Root GameSaveVault.ps1 execution failed: $($_.Exception.Message)"
     }
+}
+
+$rootInstall = Join-Path $root 'Install.ps1'
+if (Test-Path -LiteralPath $rootInstall) {
+    $installContent = Get-Content -LiteralPath $rootInstall -Raw
+    $hasForward = $installContent -match 'windows.*Install\.ps1'
+    Assert-Condition $hasForward "Root Install.ps1 forwards to windows/Install.ps1"
+}
+
+$rootInstallGsv = Join-Path $root 'Install-GameSaveVault.ps1'
+if (Test-Path -LiteralPath $rootInstallGsv) {
+    $installGsvContent = Get-Content -LiteralPath $rootInstallGsv -Raw
+    $hasForward = $installGsvContent -match 'windows.*Install-GameSaveVault\.ps1'
+    Assert-Condition $hasForward "Root Install-GameSaveVault.ps1 forwards to windows/Install-GameSaveVault.ps1"
 }
 
 # 6. Check that windows/GameSaveVault.ps1 resolves repo root correctly

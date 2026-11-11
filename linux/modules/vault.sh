@@ -416,12 +416,13 @@ gsv_resolve_snapshot_dir() {
     # 1. "latest" resolution
     if [ -z "$snapshot_id" ] || [ "$snapshot_id" = "latest" ]; then
         local latest_dir=""
-        for d in $(find "$snap_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r); do
+        while IFS= read -r d; do
+            [ -z "$d" ] && continue
             if [ -f "$d/manifest.json" ]; then
                 latest_dir="$d"
                 break
             fi
-        done
+        done < <(find "$snap_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
         if [ -n "$latest_dir" ]; then
             echo "$latest_dir"
             return 0
@@ -493,11 +494,12 @@ gsv_list_snapshots() {
     fi
 
     local snap_dirs=()
-    for d in $(find "$snap_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r); do
+    while IFS= read -r d; do
+        [ -z "$d" ] && continue
         if [ -f "$d/manifest.json" ]; then
             snap_dirs+=("$d")
         fi
-    done
+    done < <(find "$snap_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
 
     if [ "${#snap_dirs[@]}" -eq 0 ]; then
         if [ "$as_json" = "1" ]; then
@@ -523,11 +525,11 @@ gsv_list_snapshots() {
                    '. += [{
                        Id: $id,
                        Path: $path,
-                       CreatedAt: ($m[0].CreatedAt // ""),
+                       CreatedAt: ($m[0].CreatedAt // $m[0].CreatedUtc // ""),
                        Label: ($m[0].Label // ""),
-                       TotalGames: ($m[0].TotalGames // 0),
+                       TotalGames: ($m[0].TotalGames // $m[0].EntryCount // 0),
                        TotalFiles: ($m[0].TotalFiles // 0),
-                       TotalBytes: ($m[0].TotalBytes // 0)
+                       TotalBytes: ($m[0].TotalBytes // $m[0].TotalSizeBytes // 0)
                    }]' "$list_tmp" > "${list_tmp}.new" && mv -f "${list_tmp}.new" "$list_tmp"
             else
                 python3 -c '
@@ -545,11 +547,11 @@ except Exception:
 items.append({
     "Id": sid,
     "Path": spath,
-    "CreatedAt": m.get("CreatedAt", ""),
+    "CreatedAt": m.get("CreatedAt") or m.get("CreatedUtc") or "",
     "Label": m.get("Label", ""),
-    "TotalGames": m.get("TotalGames", 0),
+    "TotalGames": m.get("TotalGames") if m.get("TotalGames") is not None else m.get("EntryCount", 0),
     "TotalFiles": m.get("TotalFiles", 0),
-    "TotalBytes": m.get("TotalBytes", 0)
+    "TotalBytes": m.get("TotalBytes") if m.get("TotalBytes") is not None else m.get("TotalSizeBytes", 0)
 })
 
 with open(list_file, "w", encoding="utf-8") as f:
@@ -572,11 +574,11 @@ with open(list_file, "w", encoding="utf-8") as f:
         s_id="$(basename "$sd")"
         local created label tg tf tb
         if [ "$tool" = "jq" ]; then
-            created="$(jq -r '(.CreatedAt // "")' "$mf" 2>/dev/null)"
+            created="$(jq -r '(.CreatedAt // .CreatedUtc // "")' "$mf" 2>/dev/null)"
             label="$(jq -r '(.Label // "")' "$mf" 2>/dev/null)"
-            tg="$(jq -r '(.TotalGames // 0)' "$mf" 2>/dev/null)"
+            tg="$(jq -r '(.TotalGames // .EntryCount // 0)' "$mf" 2>/dev/null)"
             tf="$(jq -r '(.TotalFiles // 0)' "$mf" 2>/dev/null)"
-            tb="$(jq -r '(.TotalBytes // 0)' "$mf" 2>/dev/null)"
+            tb="$(jq -r '(.TotalBytes // .TotalSizeBytes // 0)' "$mf" 2>/dev/null)"
         else
             local snap_vars
             snap_vars="$(python3 -c '
@@ -586,11 +588,11 @@ try:
         m = json.load(f)
 except Exception:
     m = {}
-c = str(m.get("CreatedAt") or "")
+c = str(m.get("CreatedAt") or m.get("CreatedUtc") or "")
 l = str(m.get("Label") or "")
-tg = int(m.get("TotalGames") or 0)
+tg = m.get("TotalGames") if m.get("TotalGames") is not None else m.get("EntryCount", 0)
 tf = int(m.get("TotalFiles") or 0)
-tb = int(m.get("TotalBytes") or 0)
+tb = m.get("TotalBytes") if m.get("TotalBytes") is not None else m.get("TotalSizeBytes", 0)
 print(f"created={shlex.quote(c)} label={shlex.quote(l)} tg={tg} tf={tf} tb={tb}")
 ' "$mf" 2>/dev/null)"
             eval "$snap_vars"
@@ -648,12 +650,12 @@ gsv_restore_snapshot() {
     local matched_entries_json
     if [ "$tool" = "jq" ]; then
         matched_entries_json="$(jq --arg filter "$selected_games_filter" '
-            .Entries as $entries |
+            (.Entries // .Games // []) as $entries |
             if ($filter == "" or $filter == "all" or $filter == "*") then
                 $entries
             else
                 ($filter | split(",") | map(gsub("^\\s+|\\s+$"; "") | ascii_downcase)) as $targets |
-                $entries | map(select((.Game | ascii_downcase) as $g | $targets | index($g)))
+                $entries | map(select(((.Game // .GameName // .GameId // "") | ascii_downcase) as $g | $targets | index($g)))
             end
         ' "$manifest_path" 2>/dev/null || echo "[]")"
     else
@@ -664,7 +666,7 @@ mpath, raw_filter = sys.argv[1:3]
 try:
     with open(mpath, "r", encoding="utf-8") as f:
         data = json.load(f)
-    entries = data.get("Entries", [])
+    entries = data.get("Entries") or data.get("Games") or []
 except Exception:
     entries = []
 
@@ -673,7 +675,7 @@ if not filter_clean or filter_clean in ("all", "*"):
     matched = entries
 else:
     targets = set(t.strip().lower() for t in raw_filter.split(",") if t.strip())
-    matched = [e for e in entries if (e.get("Game") or "").strip().lower() in targets]
+    matched = [e for e in entries if (e.get("Game") or e.get("GameName") or e.get("GameId") or "").strip().lower() in targets]
 
 print(json.dumps(matched))
 ' "$manifest_path" "$selected_games_filter" 2>/dev/null || echo "[]")"
@@ -725,25 +727,38 @@ print(json.dumps(d[int(sys.argv[2])]))
 
         local game token_path orig_path rel_data_path kind
         if [ "$tool" = "jq" ]; then
-            game="$(echo "$entry_item" | jq -r '(.Game // "")' 2>/dev/null)"
-            token_path="$(echo "$entry_item" | jq -r '(.TokenPath // "")' 2>/dev/null)"
-            orig_path="$(echo "$entry_item" | jq -r '(.OriginalPath // "")' 2>/dev/null)"
-            rel_data_path="$(echo "$entry_item" | jq -r '(.RelativeDataPath // ("data/" + .Game))' 2>/dev/null)"
+            game="$(echo "$entry_item" | jq -r '(.Game // .GameName // .GameId // "")' 2>/dev/null)"
+            token_path="$(echo "$entry_item" | jq -r '(.TokenPath // (if .Token then ("%" + (.Token | ltrimstr("%") | rtrimstr("%")) + "%" + (if .RelativePath and .RelativePath != "" then ("/" + (.RelativePath | ltrimstr("/") | ltrimstr("\\"))) else "" end)) else null end) // "")' 2>/dev/null)"
+            orig_path="$(echo "$entry_item" | jq -r '(.OriginalPath // .ResolvedPath // .AbsolutePath // "")' 2>/dev/null)"
+            rel_data_path="$(echo "$entry_item" | jq -r '(.RelativeDataPath // .Payload // ("data/" + (.Game // .GameName // .GameId // "")))' 2>/dev/null)"
             kind="$(echo "$entry_item" | jq -r '(.Kind // "")' 2>/dev/null)"
         else
             local parsed_entry
             parsed_entry="$(python3 -c '
 import sys, json, shlex
 item = json.loads(sys.argv[1])
-g = item.get("Game") or ""
-tp = item.get("TokenPath") or ""
-op = item.get("OriginalPath") or ""
-rdp = item.get("RelativeDataPath") or f"data/{g}"
+g = item.get("Game") or item.get("GameName") or item.get("GameId") or ""
+tok = item.get("Token")
+rel = item.get("RelativePath") or ""
+if item.get("TokenPath"):
+    tp = item.get("TokenPath")
+elif tok:
+    tok_clean = str(tok).strip("%")
+    rel_clean = str(rel).lstrip("/\\").replace("\\", "/")
+    tp = f"%{tok_clean}%/{rel_clean}" if rel_clean else f"%{tok_clean}%"
+else:
+    tp = ""
+op = item.get("OriginalPath") or item.get("ResolvedPath") or item.get("AbsolutePath") or ""
+rdp = item.get("RelativeDataPath") or item.get("Payload") or f"data/{g}"
+rdp = str(rdp).replace("\\", "/")
 k = item.get("Kind") or ""
-print(f"game={shlex.quote(g)} token_path={shlex.quote(tp)} orig_path={shlex.quote(op)} rel_data_path={shlex.quote(rdp)} kind={shlex.quote(k)}")
+print(f"game={shlex.quote(str(g))} token_path={shlex.quote(str(tp))} orig_path={shlex.quote(str(op))} rel_data_path={shlex.quote(str(rdp))} kind={shlex.quote(str(k))}")
 ' "$entry_item" 2>/dev/null)"
             eval "$parsed_entry"
         fi
+
+        rel_data_path="${rel_data_path//\\//}"
+        token_path="${token_path//\\//}"
 
         local src_data="$snapshot_dir/$rel_data_path"
         if [ ! -e "$src_data" ]; then
@@ -760,10 +775,13 @@ print(f"game={shlex.quote(g)} token_path={shlex.quote(tp)} orig_path={shlex.quot
         if [ -n "$restore_root" ]; then
             dest="$restore_root/$game"
         else
-            if [ -n "$token_path" ] && [ "$token_path" != "null" ]; then
+            local expanded_orig="${orig_path/#\~/$HOME}"
+            if [ -n "$orig_path" ] && [ "$orig_path" != "null" ] && [[ "$expanded_orig" == /* ]] && { [ -e "$expanded_orig" ] || [ -d "$(dirname "$expanded_orig")" ]; }; then
+                dest="$expanded_orig"
+            elif [ -n "$token_path" ] && [ "$token_path" != "null" ]; then
                 dest="$(gsv_token_to_path "$token_path")"
             elif [ -n "$orig_path" ] && [ "$orig_path" != "null" ]; then
-                dest="$orig_path"
+                dest="$expanded_orig"
             else
                 dest="$HOME/GameSaves/$game"
             fi

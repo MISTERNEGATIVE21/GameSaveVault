@@ -1552,6 +1552,187 @@ test_cli_snapshots() {
     assert_match "chrono-release" "$out_json" "snapshots --json includes label"
 }
 
+test_root_install_shims() {
+    assert_true "[ -f '$REPO_ROOT/Install.ps1' ]" "Root Install.ps1 exists"
+    assert_true "[ -f '$REPO_ROOT/Install-GameSaveVault.ps1' ]" "Root Install-GameSaveVault.ps1 exists"
+    assert_true "grep -q 'windows.*Install\.ps1' '$REPO_ROOT/Install.ps1'" "Root Install.ps1 forwards to windows/Install.ps1"
+    assert_true "grep -q 'windows.*Install-GameSaveVault\.ps1' '$REPO_ROOT/Install-GameSaveVault.ps1'" "Root Install-GameSaveVault.ps1 forwards to windows/Install-GameSaveVault.ps1"
+}
+
+test_vault_restore_proton_prefix_priority() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_proton"
+    local prefix_dir="$TEST_TMP_DIR/steam_compat/12345/pfx/drive_c/users/steamuser/AppData/Local"
+    local game_save_dir="$prefix_dir/ProtonGame"
+    mkdir -p "$game_save_dir"
+    echo "proton_save_original" > "$game_save_dir/save.bin"
+
+    local locs='[
+      {
+        "Game": "ProtonGame",
+        "OriginalPath": "'"$game_save_dir"'",
+        "TokenPath": "%LOCALAPPDATA%/ProtonGame"
+      }
+    ]'
+    gsv_create_snapshot "$locs" 0 "proton-backup" "$mock_vault"
+    assert_equals "0" "$?" "gsv_create_snapshot succeeded for Proton game"
+
+    # Scenario 1: Remove the save folder, but keep parent prefix directory intact
+    rm -rf "$game_save_dir"
+    assert_true "[ ! -d '$game_save_dir' ]" "Game save folder removed"
+    assert_true "[ -d '$prefix_dir' ]" "Parent prefix directory still exists"
+
+    # Restore: should prioritize orig_path because parent exists
+    gsv_restore_snapshot "latest" "ProtonGame" 0 "" "$mock_vault"
+    assert_equals "0" "$?" "gsv_restore_snapshot returned success"
+    assert_true "[ -f '$game_save_dir/save.bin' ]" "Restored directly into Proton prefix orig_path"
+    assert_equals "proton_save_original" "$(cat "$game_save_dir/save.bin")" "Restored file content matches"
+
+    # Scenario 2: Prefix does NOT exist on machine (parent missing) -> falls back to token path
+    rm -rf "$TEST_TMP_DIR/steam_compat"
+    assert_true "[ ! -d '$prefix_dir' ]" "Proton prefix parent deleted"
+
+    local orig_home="$HOME"
+    local mock_home="$TEST_TMP_DIR/mock_home_fallback"
+    mkdir -p "$mock_home/.local/share"
+    HOME="$mock_home"
+    export XDG_DATA_HOME="$mock_home/.local/share"
+
+    gsv_restore_snapshot "latest" "ProtonGame" 0 "" "$mock_vault"
+    assert_equals "0" "$?" "gsv_restore_snapshot fallback returned success"
+    assert_true "[ -f '$mock_home/.local/share/ProtonGame/save.bin' ]" "Fell back to token_path destination"
+    assert_equals "proton_save_original" "$(cat "$mock_home/.local/share/ProtonGame/save.bin")" "Fallback restored content matches"
+
+    HOME="$orig_home"
+    unset XDG_DATA_HOME
+}
+
+test_vault_paths_and_dirs_with_spaces() {
+    local vault_with_spaces="$TEST_TMP_DIR/My Vault With Spaces"
+    mkdir -p "$vault_with_spaces"
+
+    local save_dir="$TEST_TMP_DIR/Saved Games/My Special Game"
+    mkdir -p "$save_dir"
+    echo "space_data" > "$save_dir/save.dat"
+
+    # Snapshot into vault with spaces
+    local locs='[{"Game": "My Special Game", "OriginalPath": "'"$save_dir"'"}]'
+    gsv_create_snapshot "$locs" 0 "backup with spaces" "$vault_with_spaces"
+    assert_equals "0" "$?" "gsv_create_snapshot into vault with spaces succeeded"
+
+    # Verify gsv_resolve_snapshot_dir with spaces
+    local resolved_dir
+    resolved_dir="$(gsv_resolve_snapshot_dir "latest" "$vault_with_spaces")"
+    assert_equals "0" "$?" "gsv_resolve_snapshot_dir succeeded with spaces"
+    assert_true "[ -d '$resolved_dir' ]" "Resolved directory exists"
+
+    # Verify gsv_list_snapshots with spaces
+    local list_out
+    list_out="$(gsv_list_snapshots "$vault_with_spaces")"
+    assert_equals "0" "$?" "gsv_list_snapshots succeeded with spaces"
+    assert_match "backup with spaces" "$list_out" "Table listing contains label"
+
+    local list_json
+    list_json="$(gsv_list_snapshots "$vault_with_spaces" --json)"
+    assert_equals "0" "$?" "gsv_list_snapshots --json succeeded with spaces"
+    assert_match "backup with spaces" "$list_json" "JSON listing contains label"
+
+    # Verify cmd_scan_folders with colon-separated paths containing spaces
+    local scan_dir1="$TEST_TMP_DIR/Saved Games/Folder One"
+    local scan_dir2="$TEST_TMP_DIR/Saved Games/Folder Two"
+    mkdir -p "$scan_dir1" "$scan_dir2"
+    echo "save1" > "$scan_dir1/slot1.sav"
+    echo "save2" > "$scan_dir2/slot2.sav"
+
+    # Test running cmd_scan_folders via gamevault.sh
+    local scan_out
+    scan_out="$("$REPO_ROOT/linux/gamevault.sh" scan-folders --dirs "$scan_dir1:$scan_dir2" 2>&1)"
+    local scan_status=$?
+    assert_equals "0" "$scan_status" "scan-folders with spaces succeeded"
+    assert_match "Folder One" "$scan_out" "scan-folders found Folder One"
+    assert_match "Folder Two" "$scan_out" "scan-folders found Folder Two"
+}
+
+test_windows_manifest_cross_platform_compatibility() {
+    local mock_vault="$TEST_TMP_DIR/mock_vault_win"
+    local snap_id="2026-11-11_150000"
+    local snap_dir="$mock_vault/snapshots/$snap_id"
+    local payload_dir="$snap_dir/payload/0000"
+    mkdir -p "$payload_dir"
+    echo "win_save_payload_content" > "$payload_dir/save.bin"
+
+    # Windows GSV manifest schema
+    cat <<EOF > "$snap_dir/manifest.json"
+{
+  "Version": 1,
+  "Tool": "GameSaveVault",
+  "ToolVersion": "2.0.0",
+  "CreatedUtc": "2026-11-11T15:00:00.0000000Z",
+  "Label": "windows-cross-platform-test",
+  "Machine": "WIN-GAMING-RIG",
+  "User": "Gamer",
+  "Os": "Microsoft Windows NT 10.0.22631.0",
+  "BackupRoot": "C:\\\\Users\\\\Gamer\\\\Documents\\\\GameSaves",
+  "EntryCount": 1,
+  "TotalFiles": 1,
+  "TotalBytes": 24,
+  "Entries": [
+    {
+      "GameId": "win_rpg",
+      "GameName": "Windows RPG",
+      "Source": "Custom",
+      "Token": "APPDATA",
+      "RelativePath": "WindowsRPG\\\\Saves",
+      "AbsolutePath": "C:\\\\Users\\\\Gamer\\\\AppData\\\\Roaming\\\\WindowsRPG\\\\Saves",
+      "Kind": "Directory",
+      "Payload": "payload\\\\0000",
+      "FileCount": 1,
+      "Bytes": 24,
+      "Files": [
+        {
+          "Path": "save.bin",
+          "Size": 24,
+          "LastWriteUtc": "2026-11-11T15:00:00.0000000Z"
+        }
+      ]
+    }
+  ],
+  "Errors": []
+}
+EOF
+
+    # 1. Test gsv_list_snapshots reads Windows manifest metadata
+    local list_out
+    list_out="$(gsv_list_snapshots "$mock_vault")"
+    assert_equals "0" "$?" "gsv_list_snapshots succeeded for Windows manifest"
+    assert_match "windows-cross-platform-test" "$list_out" "Table listing includes Windows label"
+    assert_match "2026-11-11 15:00:00" "$list_out" "Table listing displays CreatedUtc"
+
+    local list_json
+    list_json="$(gsv_list_snapshots "$mock_vault" --json)"
+    assert_equals "0" "$?" "gsv_list_snapshots --json succeeded for Windows manifest"
+    assert_match "2026-11-11T15:00:00" "$list_json" "JSON listing includes CreatedAt from CreatedUtc"
+    assert_match '"TotalGames": 1' "$list_json" "JSON listing includes TotalGames from EntryCount"
+
+    # 2. Test gsv_restore_snapshot restores using Windows manifest fields
+    local orig_home="$HOME"
+    local mock_home="$TEST_TMP_DIR/mock_home_win_restore"
+    mkdir -p "$mock_home/.config"
+    HOME="$mock_home"
+    export XDG_CONFIG_HOME="$mock_home/.config"
+
+    # Restore Windows RPG by name
+    gsv_restore_snapshot "latest" "Windows RPG" 0 "" "$mock_vault"
+    assert_equals "0" "$?" "gsv_restore_snapshot succeeded for Windows snapshot"
+
+    # Dest should resolve via %APPDATA%/WindowsRPG/Saves -> $mock_home/.config/WindowsRPG/Saves
+    local restored_file="$mock_home/.config/WindowsRPG/Saves/save.bin"
+    assert_true "[ -f '$restored_file' ]" "Windows snapshot restored to mapped Linux token location ($restored_file)"
+    assert_equals "win_save_payload_content" "$(cat "$restored_file")" "Restored Windows payload content matches"
+
+    HOME="$orig_home"
+    unset XDG_CONFIG_HOME
+}
+
 # ==============================================================================
 # Runner
 # ==============================================================================
@@ -1612,6 +1793,11 @@ run_test test_cli_invalid_command "CLI invalid command returns exit code 1"
 run_test test_cli_scan_and_scan_db "CLI scan, scan-folders, and scan-db workflows"
 run_test test_cli_backup_and_restore_dry_run "CLI backup and restore --dry-run flags"
 run_test test_cli_snapshots "CLI snapshots list in table and json formats"
+
+run_test test_root_install_shims "Root install shims forward to windows/ scripts"
+run_test test_vault_restore_proton_prefix_priority "Proton restore prioritizes orig_path when parent exists"
+run_test test_vault_paths_and_dirs_with_spaces "Vault paths and custom dirs with spaces work without word-splitting"
+run_test test_windows_manifest_cross_platform_compatibility "Windows-format manifest fields parsed and restored on Linux"
 
 echo
 echo -e "${BLUE}=== Test Summary ===${NC}"
