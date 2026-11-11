@@ -106,6 +106,28 @@ if (Test-Path -LiteralPath $windowsGui) {
     Assert-Condition $hasRootFix "windows/GameSaveVault-GUI.ps1 resolves parent repository root for modules/config"
 }
 
+# 7. Check internal script references in windows/Install.ps1 and windows/Register-ScheduledBackup.ps1
+$installScript = Join-Path $windowsDir 'Install.ps1'
+if (Test-Path -LiteralPath $installScript) {
+    $installContent = Get-Content -LiteralPath $installScript -Raw
+    $guiRefResolved = (Join-Path $windowsDir 'GameSaveVault-GUI.ps1')
+    $schedRefResolved = (Join-Path $windowsDir 'Register-ScheduledBackup.ps1')
+    
+    $hasGuiCheck = $installContent -match 'Join-Path \$PSScriptRoot ''GameSaveVault-GUI\.ps1'''
+    $hasSchedCheck = $installContent -match 'Join-Path \$PSScriptRoot ''Register-ScheduledBackup\.ps1'''
+    
+    Assert-Condition ($hasGuiCheck -and (Test-Path -LiteralPath $guiRefResolved)) "windows/Install.ps1 references GameSaveVault-GUI.ps1 in windows/ directory"
+    Assert-Condition ($hasSchedCheck -and (Test-Path -LiteralPath $schedRefResolved)) "windows/Install.ps1 references Register-ScheduledBackup.ps1 in windows/ directory"
+}
+
+$registerScript = Join-Path $windowsDir 'Register-ScheduledBackup.ps1'
+if (Test-Path -LiteralPath $registerScript) {
+    $registerContent = Get-Content -LiteralPath $registerScript -Raw
+    $cliRefResolved = (Join-Path $windowsDir 'GameSaveVault.ps1')
+    $hasCliCheck = $registerContent -match 'Join-Path \$PSScriptRoot ''GameSaveVault\.ps1'''
+    Assert-Condition ($hasCliCheck -and (Test-Path -LiteralPath $cliRefResolved)) "windows/Register-ScheduledBackup.ps1 references GameSaveVault.ps1 in windows/ directory"
+}
+
 Write-Host ''
 if ($failures.Count -gt 0) {
     Write-Host "FAILED: $($failures.Count) assertion(s) failed." -ForegroundColor Red

@@ -61,7 +61,14 @@ if (-not $NoShortcut) {
 }
 
 if ($ScheduledTask) {
-    & (Join-Path $root 'Register-ScheduledBackup.ps1') -Time $Time
+    $scheduler = Join-Path $PSScriptRoot 'Register-ScheduledBackup.ps1'
+    if (-not (Test-Path -LiteralPath $scheduler)) {
+        $scheduler = Join-Path $root 'Register-ScheduledBackup.ps1'
+    }
+    if (-not (Test-Path -LiteralPath $scheduler)) {
+        throw "Register-ScheduledBackup.ps1 not found."
+    }
+    & $scheduler -Time $Time
 }
 
 Write-Host ''
