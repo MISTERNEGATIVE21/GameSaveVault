@@ -70,10 +70,11 @@ run_test() {
     echo -ne "  RUN: $desc ... "
     local output
     if output=$(
+        exec 2>&1
         _TEST_FAIL=0
         $test_func
         exit $_TEST_FAIL
-    2>&1); then
+    ); then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "${GREEN}PASS${NC}"
     else
@@ -106,6 +107,12 @@ VAULT_SH="$REPO_ROOT/linux/modules/vault.sh"
 if [ -f "$VAULT_SH" ]; then
     # shellcheck source=../linux/modules/vault.sh
     source "$VAULT_SH"
+fi
+
+UI_SH="$REPO_ROOT/linux/modules/ui.sh"
+if [ -f "$UI_SH" ]; then
+    # shellcheck source=../linux/modules/ui.sh
+    source "$UI_SH"
 fi
 
 # ==============================================================================
@@ -1082,6 +1089,152 @@ test_vault_restore_zero_matching_games() {
 }
 
 # ==============================================================================
+# Unit Tests: ui.sh
+# ==============================================================================
+
+test_ui_mode_detection_override() {
+    local mode
+    mode=$(GSV_UI_MODE="cli" gsv_ui_detect)
+    assert_equals "cli" "$mode" "Override cli returns cli"
+
+    mode=$(GSV_UI_MODE="gui" gsv_ui_detect)
+    assert_equals "zenity" "$mode" "Override gui returns zenity"
+
+    mode=$(GSV_UI_MODE="zenity" gsv_ui_detect)
+    assert_equals "zenity" "$mode" "Override zenity returns zenity"
+
+    mode=$(GSV_UI_MODE="dialog" gsv_ui_detect)
+    assert_equals "dialog" "$mode" "Override dialog returns dialog"
+
+    mode=$(GSV_UI_MODE="whiptail" gsv_ui_detect)
+    assert_equals "whiptail" "$mode" "Override whiptail returns whiptail"
+
+    mode=$(GSV_UI_MODE="tui" gsv_ui_detect)
+    assert_true "[ '$mode' = 'whiptail' ] || [ '$mode' = 'dialog' ] || [ '$mode' = 'cli' ]" "Override tui selects available TUI tool"
+}
+
+test_ui_mode_detection_auto() {
+    local mode
+    # Auto-detection when DISPLAY is set and zenity is in PATH
+    mode=$(unset GSV_UI_MODE; DISPLAY=":0" gsv_ui_detect)
+    assert_equals "zenity" "$mode" "Auto-detection chooses zenity when DISPLAY is active"
+
+    # Auto-detection in headless / non-terminal without display falls back to cli
+    mode=$(unset GSV_UI_MODE DISPLAY WAYLAND_DISPLAY; echo "" | gsv_ui_detect)
+    assert_equals "cli" "$mode" "Auto-detection chooses cli when headless without DISPLAY"
+}
+
+test_ui_message_cli() {
+    local out
+    out=$(GSV_UI_MODE="cli" gsv_ui_message "Test Info" "Hello Info World" "info")
+    local status=$?
+    assert_equals "0" "$status" "gsv_ui_message info succeeded"
+
+    out=$(GSV_UI_MODE="cli" gsv_ui_message "Test Warning" "Hello Warning" "warning")
+    status=$?
+    assert_equals "0" "$status" "gsv_ui_message warning succeeded"
+
+    out=$(GSV_UI_MODE="cli" gsv_ui_message "Test Error" "Hello Error" "error")
+    status=$?
+    assert_equals "0" "$status" "gsv_ui_message error succeeded"
+}
+
+test_ui_confirm_cli() {
+    echo "y" | GSV_UI_MODE="cli" gsv_ui_confirm "Confirm" "Proceed with operation?"
+    assert_equals "0" "$?" "Confirm with 'y' returns 0"
+
+    echo "yes" | GSV_UI_MODE="cli" gsv_ui_confirm "Confirm" "Proceed with operation?"
+    assert_equals "0" "$?" "Confirm with 'yes' returns 0"
+
+    echo "n" | GSV_UI_MODE="cli" gsv_ui_confirm "Confirm" "Proceed with operation?"
+    assert_equals "1" "$?" "Confirm with 'n' returns 1"
+
+    echo "no" | GSV_UI_MODE="cli" gsv_ui_confirm "Confirm" "Proceed with operation?"
+    assert_equals "1" "$?" "Confirm with 'no' returns 1"
+
+    echo "" | GSV_UI_MODE="cli" gsv_ui_confirm "Confirm" "Proceed with operation?"
+    assert_equals "1" "$?" "Confirm with empty/default returns 1"
+}
+
+test_ui_menu_cli() {
+    local choice
+    choice=$(printf "2\n" | GSV_UI_MODE="cli" gsv_ui_menu "Main Menu" "Choose an option:" "scan" "Scan games" "backup" "Backup saves" "restore" "Restore saves")
+    assert_equals "backup" "$choice" "Menu selection by number 2 returns 'backup'"
+
+    choice=$(printf "restore\n" | GSV_UI_MODE="cli" gsv_ui_menu "Main Menu" "Choose an option:" "scan" "Scan games" "backup" "Backup saves" "restore" "Restore saves")
+    assert_equals "restore" "$choice" "Menu selection by tag returns 'restore'"
+
+    choice=$(printf "invalid\n" | GSV_UI_MODE="cli" gsv_ui_menu "Main Menu" "Choose an option:" "scan" "Scan games" "exit" "Exit")
+    local status=$?
+    assert_equals "1" "$status" "Invalid menu choice returns exit status 1"
+}
+
+test_ui_checklist_cli() {
+    local selected
+    # Selection by comma-separated numbers
+    selected=$(printf "1,3\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "OFF" "GameB" "Path B" "OFF" "GameC" "Path C" "OFF")
+    assert_match "GameA" "$selected" "Selected contains GameA"
+    assert_match "GameC" "$selected" "Selected contains GameC"
+    assert_true "[[ ! '$selected' =~ 'GameB' ]]" "Selected does not contain GameB"
+
+    # Selection by default (Enter takes items marked ON/TRUE)
+    selected=$(printf "\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "ON" "GameB" "Path B" "OFF" "GameC" "Path C" "TRUE")
+    assert_match "GameA" "$selected" "Default contains GameA"
+    assert_match "GameC" "$selected" "Default contains GameC"
+    assert_true "[[ ! '$selected' =~ 'GameB' ]]" "Default does not contain GameB"
+
+    # Selection by "all"
+    selected=$(printf "all\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "OFF" "GameB" "Path B" "OFF")
+    assert_match "GameA" "$selected" "'all' contains GameA"
+    assert_match "GameB" "$selected" "'all' contains GameB"
+
+    # Selection by "none"
+    selected=$(printf "none\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "ON" "GameB" "Path B" "ON")
+    assert_equals "" "$selected" "'none' returns empty selection"
+}
+
+test_ui_dir_picker_cli() {
+    local picked
+    picked=$(printf "/custom/game/vault\n" | GSV_UI_MODE="cli" gsv_ui_dir_picker "Select Vault" "/default/vault")
+    assert_equals "/custom/game/vault" "$picked" "Custom dir input returns custom path"
+
+    picked=$(printf "\n" | GSV_UI_MODE="cli" gsv_ui_dir_picker "Select Vault" "/default/vault")
+    assert_equals "/default/vault" "$picked" "Default dir input returns default path"
+}
+
+test_ui_input_cli() {
+    local val
+    val=$(printf "my-custom-snapshot\n" | GSV_UI_MODE="cli" gsv_ui_input "Snapshot Label" "Enter label:" "manual-backup")
+    assert_equals "my-custom-snapshot" "$val" "Custom input string returned"
+
+    val=$(printf "\n" | GSV_UI_MODE="cli" gsv_ui_input "Snapshot Label" "Enter label:" "manual-backup")
+    assert_equals "manual-backup" "$val" "Default input string returned on empty enter"
+}
+
+test_doctor_health_check() {
+    local report_file="$TEST_TMP_DIR/doctor_report.txt"
+    local status
+    gsv_run_doctor "$report_file"
+    status=$?
+    assert_equals "0" "$status" "gsv_run_doctor returned 0 for healthy environment"
+    assert_true "[ -f '$report_file' ]" "Doctor report file created"
+
+    local report_content
+    report_content=$(cat "$report_file")
+    assert_match "GameSaveVault Health Check" "$report_content" "Report contains title"
+    assert_match "jq" "$report_content" "Report mentions jq"
+    assert_match "rsync" "$report_content" "Report mentions rsync"
+    assert_match "Vault Path" "$report_content" "Report checks Vault Path"
+}
+
+test_launch_dashboard_exit() {
+    # Option 8 is Exit in the main menu loop
+    printf "8\n" | GSV_UI_MODE="cli" gsv_launch_dashboard
+    local status=$?
+    assert_equals "0" "$status" "Dashboard loop exits cleanly on option 8"
+}
+
+# ==============================================================================
 # Runner
 # ==============================================================================
 echo -e "${BLUE}=== Running Linux GameSaveVault Test Suite ===${NC}"
@@ -1115,6 +1268,17 @@ run_test test_vault_restore_token_path "Restore snapshot using token path resolu
 run_test test_vault_rollback_collision_protection "Rollback safety preserves conflicting destination (gsv_restore_snapshot)"
 run_test test_vault_dry_run_restore "Dry run restore makes no modifications (gsv_restore_snapshot)"
 run_test test_vault_restore_zero_matching_games "Restore with 0 matching games exits cleanly (gsv_restore_snapshot)"
+
+run_test test_ui_mode_detection_override "UI mode override via GSV_UI_MODE (gsv_ui_detect)"
+run_test test_ui_mode_detection_auto "UI mode auto-detection (gsv_ui_detect)"
+run_test test_ui_message_cli "Headless CLI message box (gsv_ui_message)"
+run_test test_ui_confirm_cli "Headless CLI confirm prompt (gsv_ui_confirm)"
+run_test test_ui_menu_cli "Headless CLI menu selection (gsv_ui_menu)"
+run_test test_ui_checklist_cli "Headless CLI multi-select checklist (gsv_ui_checklist)"
+run_test test_ui_dir_picker_cli "Headless CLI directory picker (gsv_ui_dir_picker)"
+run_test test_ui_input_cli "Headless CLI text input prompt (gsv_ui_input)"
+run_test test_doctor_health_check "Health check diagnostics (gsv_run_doctor)"
+run_test test_launch_dashboard_exit "Interactive dashboard main menu loop (gsv_launch_dashboard)"
 
 echo
 echo -e "${BLUE}=== Test Summary ===${NC}"
