@@ -32,6 +32,7 @@ assert_equals() {
         echo -e "${RED}FAIL:${NC} $msg"
         echo -e "  Expected: [${expected}]"
         echo -e "  Actual:   [${actual}]"
+        _TEST_FAIL=1
         return 1
     fi
     return 0
@@ -45,6 +46,7 @@ assert_match() {
         echo -e "${RED}FAIL:${NC} $msg"
         echo -e "  Pattern: [${pattern}]"
         echo -e "  Actual:  [${actual}]"
+        _TEST_FAIL=1
         return 1
     fi
     return 0
@@ -55,6 +57,7 @@ assert_true() {
     local msg="${2:-Condition is not true}"
     if ! eval "$condition"; then
         echo -e "${RED}FAIL:${NC} $msg ($condition)"
+        _TEST_FAIL=1
         return 1
     fi
     return 0
@@ -66,7 +69,11 @@ run_test() {
     TESTS_RUN=$((TESTS_RUN + 1))
     echo -ne "  RUN: $desc ... "
     local output
-    if output=$($test_func 2>&1); then
+    if output=$(
+        _TEST_FAIL=0
+        $test_func
+        exit $_TEST_FAIL
+    2>&1); then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "${GREEN}PASS${NC}"
     else
@@ -79,7 +86,7 @@ run_test() {
 }
 
 # ==============================================================================
-# Load common module
+# Load modules
 # ==============================================================================
 COMMON_SH="$REPO_ROOT/linux/modules/common.sh"
 if [ ! -f "$COMMON_SH" ]; then
@@ -88,6 +95,12 @@ if [ ! -f "$COMMON_SH" ]; then
 fi
 # shellcheck source=../linux/modules/common.sh
 source "$COMMON_SH"
+
+SCANNER_SH="$REPO_ROOT/linux/modules/scanner.sh"
+if [ -f "$SCANNER_SH" ]; then
+    # shellcheck source=../linux/modules/scanner.sh
+    source "$SCANNER_SH"
+fi
 
 # ==============================================================================
 # Unit Tests: common.sh
@@ -455,6 +468,344 @@ test_logging_helpers() {
 }
 
 # ==============================================================================
+# Unit Tests: scanner.sh
+# ==============================================================================
+
+test_scan_steam_proton() {
+    local mock_steam="$TEST_TMP_DIR/mock_steam"
+    local mock_compat="$mock_steam/steamapps/compatdata"
+    local pfx_elden="$mock_compat/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing"
+    mkdir -p "$pfx_elden"
+    echo "slot0_data" > "$pfx_elden/ER0000.sl2"
+
+    local orig_config="$GSV_CONFIG_DIR"
+    local mock_cfg="$TEST_TMP_DIR/mock_cfg_steam"
+    mkdir -p "$mock_cfg"
+    echo '{"1245620": "ELDEN RING"}' > "$mock_cfg/title-names.json"
+    GSV_CONFIG_DIR="$mock_cfg"
+
+    local result
+    result="$(gsv_scan_steam_proton "$mock_compat")"
+    GSV_CONFIG_DIR="$orig_config"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Result is valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "1" "$count" "Found 1 Elden Ring save location"
+
+    local gname gid aid src tok
+    gname="$(echo "$result" | jq -r '.[0].GameName')"
+    gid="$(echo "$result" | jq -r '.[0].GameId')"
+    aid="$(echo "$result" | jq -r '.[0].AppId')"
+    src="$(echo "$result" | jq -r '.[0].Source')"
+    tok="$(echo "$result" | jq -r '.[0].Token')"
+
+    assert_equals "ELDEN RING" "$gname" "GameName resolved from title-names.json"
+    assert_equals "steam-1245620" "$gid" "GameId is steam-1245620"
+    assert_equals "1245620" "$aid" "AppId is 1245620"
+    assert_equals "SteamProton" "$src" "Source is SteamProton"
+    assert_equals "APPDATA" "$tok" "Token is APPDATA"
+
+    local fc bytes
+    fc="$(echo "$result" | jq -r '.[0].FileCount')"
+    bytes="$(echo "$result" | jq -r '.[0].Bytes')"
+    assert_equals "1" "$fc" "File count is 1"
+    assert_true "[ '$bytes' -gt 0 ]" "Bytes greater than 0"
+}
+
+test_scan_steam_proton_incomplete_prefix() {
+    local mock_compat="$TEST_TMP_DIR/mock_steam_incomplete/compatdata"
+    # 1. Missing pfx/drive_c entirely
+    mkdir -p "$mock_compat/999001/pfx"
+    # 2. Has drive_c but missing users/
+    mkdir -p "$mock_compat/999002/pfx/drive_c"
+    # 3. Has users/steamuser but no save directories
+    mkdir -p "$mock_compat/999003/pfx/drive_c/users/steamuser"
+    # 4. Valid prefix alongside incomplete ones
+    local valid_pfx="$mock_compat/999004/pfx/drive_c/users/steamuser/Documents/My Games/ValidGame"
+    mkdir -p "$valid_pfx"
+    echo "save" > "$valid_pfx/save.sav"
+
+    local result
+    result="$(gsv_scan_steam_proton "$mock_compat")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Result is valid JSON even with incomplete prefixes"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "1" "$count" "Only valid prefix is returned"
+
+    local gname
+    gname="$(echo "$result" | jq -r '.[0].GameName')"
+    assert_equals "AppID 999004" "$gname" "Fallback to AppID when not in title-names"
+}
+
+test_title_lookup_special_characters() {
+    local mock_compat="$TEST_TMP_DIR/mock_steam_special/compatdata"
+    local special_title="Dragon's Dogma 2: \"Deluxe\" & Special \\ Paths"
+    local pfx_special="$mock_compat/1086940/pfx/drive_c/users/steamuser/AppData/Local/Capcom/DD2"
+    mkdir -p "$pfx_special"
+    echo "profile_data" > "$pfx_special/data001.bin"
+
+    local orig_config="$GSV_CONFIG_DIR"
+    local mock_cfg="$TEST_TMP_DIR/mock_cfg_special"
+    mkdir -p "$mock_cfg"
+    python3 -c '
+import json, sys
+data = {"1086940": sys.argv[1]}
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    json.dump(data, f)
+' "$special_title" "$mock_cfg/title-names.json"
+    GSV_CONFIG_DIR="$mock_cfg"
+
+    local result
+    result="$(gsv_scan_steam_proton "$mock_compat")"
+    GSV_CONFIG_DIR="$orig_config"
+
+    echo "$result" | jq . >/dev/null 2>&1
+    local jq_status=$?
+    assert_equals "0" "$jq_status" "Valid JSON with special characters"
+
+    local parsed_title
+    parsed_title="$(echo "$result" | jq -r '.[0].GameName')"
+    assert_equals "$special_title" "$parsed_title" "Special character title survived JSON escaping"
+}
+
+test_scan_native_games() {
+    local mock_home="$TEST_TMP_DIR/mock_home_native"
+    local mock_share="$mock_home/.local/share"
+    local mock_config="$mock_home/.config"
+
+    mkdir -p "$mock_share/Celeste/Saves"
+    echo "celeste_data" > "$mock_share/Celeste/Saves/0.celeste"
+
+    mkdir -p "$mock_config/Hollow Knight"
+    echo "hk_data" > "$mock_config/Hollow Knight/user1.dat"
+
+    # System directory that must be ignored
+    mkdir -p "$mock_share/systemd"
+    echo "service" > "$mock_share/systemd/user.service"
+
+    local result
+    result="$(gsv_scan_native_games "$mock_share" "$mock_config")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Native games scan is valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "2" "$count" "Found 2 native game save locations (Celeste, Hollow Knight)"
+
+    local src0 src1
+    src0="$(echo "$result" | jq -r '.[0].Source')"
+    src1="$(echo "$result" | jq -r '.[1].Source')"
+    assert_equals "Native" "$src0" "Source is Native"
+    assert_equals "Native" "$src1" "Source is Native"
+}
+
+test_scan_wine_lutris_heroic() {
+    local mock_roots="$TEST_TMP_DIR/mock_wine_lutris"
+    local mock_wine="$mock_roots/.wine/drive_c/users/tester/AppData/Roaming/WineGame"
+    mkdir -p "$mock_wine"
+    echo "wine_save" > "$mock_wine/save.bin"
+
+    local mock_games="$mock_roots/Games/lutris-game/drive_c/users/tester/Saved Games/LutrisGame"
+    mkdir -p "$mock_games"
+    echo "lutris_save" > "$mock_games/save.sav"
+
+    local mock_heroic="$mock_roots/.config/heroic/Prefixes/HeroicGame/pfx/drive_c/users/tester/Documents/HeroicGame"
+    mkdir -p "$mock_heroic"
+    echo "heroic_save" > "$mock_heroic/game.dat"
+
+    local result
+    result="$(gsv_scan_wine_lutris_heroic "$mock_roots/.wine" "$mock_roots/Games" "$mock_roots/.config/heroic/Prefixes")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Wine/Lutris/Heroic scan is valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "3" "$count" "Found Wine, Lutris, and Heroic prefixes"
+}
+
+test_scan_emulators() {
+    local mock_emu="$TEST_TMP_DIR/mock_emu"
+    # Ryujinx save for Stardew Valley (title 0100e65002bb8000 in data/title-names.json)
+    local ryu_save="$mock_emu/Ryujinx/bis/user/save/0000000000000001/0100e65002bb8000/0"
+    mkdir -p "$ryu_save"
+    echo "stardew_save" > "$ryu_save/savegame.sav"
+
+    # RPCS3 save
+    local rpcs3_save="$mock_emu/rpcs3/dev_hdd0/home/00000001/savedata/BLUS30443"
+    mkdir -p "$rpcs3_save"
+    echo "rpcs3_data" > "$rpcs3_save/SYS-DATA"
+
+    local result
+    result="$(gsv_scan_emulators "$mock_emu")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Emulator scan is valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "2" "$count" "Found 2 emulator save locations"
+
+    local ryu_name
+    ryu_name="$(echo "$result" | jq -r '.[] | select(.GameId | startswith("ryujinx")) | .GameName')"
+    assert_equals "Stardew Valley" "$ryu_name" "Ryujinx title resolved to Stardew Valley"
+}
+
+test_deep_scan_folder() {
+    local custom_root="$TEST_TMP_DIR/deep_scan_root"
+    mkdir -p "$custom_root/GameAlpha/saves"
+    echo "alpha_save" > "$custom_root/GameAlpha/saves/slot1.sav"
+
+    mkdir -p "$custom_root/GameBeta"
+    echo "beta_save" > "$custom_root/GameBeta/profile.sl2"
+
+    mkdir -p "$custom_root/GameGamma/savedata"
+    echo "gamma_save" > "$custom_root/GameGamma/savedata/save001.dat"
+
+    # Pruned directories
+    mkdir -p "$custom_root/.git/hooks"
+    echo "hook" > "$custom_root/.git/hooks/pre-commit.sav"
+
+    mkdir -p "$custom_root/cache/temp"
+    echo "tmp" > "$custom_root/cache/temp/data.dat"
+
+    local result
+    result="$(gsv_deep_scan_folder "$custom_root" 5)"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Deep scan returns valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "3" "$count" "Found 3 deep scan game locations"
+
+    local has_git has_cache
+    has_git="$(echo "$result" | jq '[.[] | select(.AbsolutePath | contains(".git"))] | length')"
+    has_cache="$(echo "$result" | jq '[.[] | select(.AbsolutePath | contains("cache"))] | length')"
+    assert_equals "0" "$has_git" "Pruned .git directory"
+    assert_equals "0" "$has_cache" "Pruned cache directory"
+}
+
+test_update_scan_database() {
+    local mock_config="$TEST_TMP_DIR/mock_scandb_config"
+    mkdir -p "$mock_config"
+    local orig_config="$GSV_CONFIG_DIR"
+    GSV_CONFIG_DIR="$mock_config"
+
+    local locs='[
+      {
+        "GameId": "steam-1245620",
+        "GameName": "ELDEN RING",
+        "Source": "SteamProton",
+        "AppId": "1245620",
+        "InstallDirHint": "",
+        "Token": "APPDATA",
+        "RelativePath": "EldenRing",
+        "AbsolutePath": "/home/user/.steam/steam/steamapps/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing",
+        "ResolvedPath": "/home/user/.steam/steam/steamapps/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing",
+        "Kind": "Directory",
+        "RegistryKey": "",
+        "Note": "",
+        "Origin": "proton",
+        "RuleId": "",
+        "RestoreMode": "",
+        "InstallDirNames": [],
+        "FilePatterns": [],
+        "FileCount": 1,
+        "Bytes": 1024,
+        "ScanRoot": "/home/user/.steam/steam/steamapps/compatdata",
+        "DiscoveredUtc": "2026-11-11T12:00:00Z"
+      }
+    ]'
+
+    gsv_update_scan_database "$locs" '["/home/user/.steam/steam/steamapps/compatdata"]'
+
+    local db_file="$mock_config/scan-database.json"
+    assert_true "[ -f '$db_file' ]" "scan-database.json was created"
+
+    local version tool roots_len locs_len
+    version="$(gsv_json_get "$db_file" ".Version")"
+    tool="$(gsv_json_get "$db_file" ".Tool")"
+    roots_len="$(echo "$(cat "$db_file")" | jq '.Roots | length')"
+    locs_len="$(echo "$(cat "$db_file")" | jq '.Locations | length')"
+
+    assert_equals "1" "$version" "Database Version is 1"
+    assert_equals "GameSaveVault" "$tool" "Database Tool is GameSaveVault"
+    assert_equals "1" "$roots_len" "Roots length is 1"
+    assert_equals "1" "$locs_len" "Locations length is 1"
+
+    # Add second scan result to test merge / deduplication
+    local locs2='[
+      {
+        "GameId": "native-celeste",
+        "GameName": "Celeste",
+        "Source": "Native",
+        "AppId": "",
+        "InstallDirHint": "",
+        "Token": "XDG_DATA_HOME",
+        "RelativePath": "Celeste/Saves",
+        "AbsolutePath": "/home/user/.local/share/Celeste/Saves",
+        "ResolvedPath": "/home/user/.local/share/Celeste/Saves",
+        "Kind": "Directory",
+        "RegistryKey": "",
+        "Note": "",
+        "Origin": "native",
+        "RuleId": "",
+        "RestoreMode": "",
+        "InstallDirNames": [],
+        "FilePatterns": [],
+        "FileCount": 2,
+        "Bytes": 2048,
+        "ScanRoot": "/home/user/.local/share",
+        "DiscoveredUtc": "2026-11-11T12:05:00Z"
+      }
+    ]'
+
+    gsv_update_scan_database "$locs2" '["/home/user/.local/share"]'
+
+    roots_len="$(echo "$(cat "$db_file")" | jq '.Roots | length')"
+    locs_len="$(echo "$(cat "$db_file")" | jq '.Locations | length')"
+    assert_equals "2" "$roots_len" "Roots updated to 2"
+    assert_equals "2" "$locs_len" "Locations updated to 2"
+
+    GSV_CONFIG_DIR="$orig_config"
+}
+
+test_scan_all() {
+    local orig_home="$HOME"
+    local orig_data="${XDG_DATA_HOME:-}"
+    local orig_cfg="${XDG_CONFIG_HOME:-}"
+    local mock_home="$TEST_TMP_DIR/mock_home_all"
+    mkdir -p "$mock_home/.local/share/TestGame/saves"
+    echo "test" > "$mock_home/.local/share/TestGame/saves/save.sav"
+    HOME="$mock_home"
+    XDG_DATA_HOME="$mock_home/.local/share"
+    XDG_CONFIG_HOME="$mock_home/.config"
+
+    local all_result
+    all_result="$(gsv_scan_all)"
+    HOME="$orig_home"
+    if [ -n "$orig_data" ]; then
+        XDG_DATA_HOME="$orig_data"
+    else
+        unset XDG_DATA_HOME
+    fi
+    if [ -n "$orig_cfg" ]; then
+        XDG_CONFIG_HOME="$orig_cfg"
+    else
+        unset XDG_CONFIG_HOME
+    fi
+
+    assert_true "[ -n '$all_result' ]" "gsv_scan_all returned output"
+    echo "$all_result" | jq . >/dev/null 2>&1
+    local jq_status=$?
+    assert_equals "0" "$jq_status" "gsv_scan_all produces valid JSON array"
+
+    local is_array
+    is_array="$(echo "$all_result" | jq 'if type == "array" then "true" else "false" end' 2>/dev/null)"
+    assert_equals '"true"' "$is_array" "Output is a JSON array"
+
+    local count
+    count="$(echo "$all_result" | jq 'length')"
+    assert_equals "1" "$count" "gsv_scan_all found 1 game in mock home"
+}
+
+# ==============================================================================
 # Runner
 # ==============================================================================
 echo -e "${BLUE}=== Running Linux GameSaveVault Test Suite ===${NC}"
@@ -468,6 +819,16 @@ run_test test_json_set_python "JSON set with python3 fallback (gsv_json_set)"
 run_test test_vault_resolution_order "Vault resolution order (gsv_resolve_vault_path)"
 run_test test_token_mapping_roundtrip "Token mapping round-trip (gsv_path_to_token / gsv_token_to_path)"
 run_test test_logging_helpers "Logging helpers (gsv_log_*)"
+
+run_test test_scan_steam_proton "Scan Steam Proton prefix (gsv_scan_steam_proton)"
+run_test test_scan_steam_proton_incomplete_prefix "Graceful handling of incomplete Proton prefixes"
+run_test test_title_lookup_special_characters "JSON escaping and title lookup with special characters"
+run_test test_scan_native_games "Scan native Linux game saves (gsv_scan_native_games)"
+run_test test_scan_wine_lutris_heroic "Scan Wine, Lutris, and Heroic prefixes (gsv_scan_wine_lutris_heroic)"
+run_test test_scan_emulators "Scan emulator save paths (gsv_scan_emulators)"
+run_test test_deep_scan_folder "Deep scan custom folder for save extensions (gsv_deep_scan_folder)"
+run_test test_update_scan_database "Update scan database JSON and schema compliance (gsv_update_scan_database)"
+run_test test_scan_all "Aggregate all scans (gsv_scan_all)"
 
 echo
 echo -e "${BLUE}=== Test Summary ===${NC}"
