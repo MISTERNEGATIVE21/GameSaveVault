@@ -17,8 +17,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
-$cli = Join-Path $root 'GameSaveVault.ps1'
+$root = Split-Path -Parent $PSScriptRoot
+$cli = Join-Path $PSScriptRoot 'GameSaveVault.ps1'
+if (-not (Test-Path -LiteralPath $cli)) {
+    $cli = Join-Path $root 'GameSaveVault.ps1'
+}
 
 if ($Unregister) {
     & schtasks.exe /Delete /TN $TaskName /F

@@ -16,8 +16,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
-$gui = Join-Path $root 'GameSaveVault-GUI.ps1'
+$root = Split-Path -Parent $PSScriptRoot
+$gui = Join-Path $PSScriptRoot 'GameSaveVault-GUI.ps1'
+if (-not (Test-Path -LiteralPath $gui)) {
+    $gui = Join-Path $root 'GameSaveVault-GUI.ps1'
+}
 
 if (-not (Test-Path -LiteralPath $gui)) {
     throw "GameSaveVault-GUI.ps1 not found next to Install.ps1."

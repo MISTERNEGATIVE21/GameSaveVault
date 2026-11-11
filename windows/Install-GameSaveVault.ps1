@@ -57,7 +57,10 @@ try {
     Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
 
     $src = Get-ChildItem -LiteralPath $temp -Directory |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'GameSaveVault.ps1') } |
+        Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_.FullName 'GameSaveVault.ps1')) -or
+            (Test-Path -LiteralPath (Join-Path $_.FullName 'windows\GameSaveVault.ps1'))
+        } |
         Select-Object -First 1
     if (-not $src) {
         throw 'The downloaded archive does not contain GameSaveVault.ps1.'
@@ -70,7 +73,10 @@ try {
     Write-Step "Copying files to $InstallDir..."
     Copy-Item -Path (Join-Path $src.FullName '*') -Destination $InstallDir -Recurse -Force
 
-    $installer = Join-Path $InstallDir 'Install.ps1'
+    $installer = Join-Path $InstallDir 'windows\Install.ps1'
+    if (-not (Test-Path -LiteralPath $installer)) {
+        $installer = Join-Path $InstallDir 'Install.ps1'
+    }
     if (-not (Test-Path -LiteralPath $installer)) {
         throw "Install.ps1 was not found in $InstallDir."
     }
