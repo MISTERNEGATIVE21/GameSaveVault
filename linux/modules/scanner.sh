@@ -24,13 +24,13 @@ fi
 _gsv_is_pruned() {
     local name="${1,,}"
     case "$name" in
-        windows|winsxs|\$recycle.bin|system\ volume\ information|recovery|perflogs|msocache|config.msi|\$winreagent) return 0 ;;
-        program\ files|program\ files\ \(x86\)|installer|temp|tmp|cache|caches|shadercache|crashreports|crashdumps) return 0 ;;
-        node_modules|.git|.svn|.hg|__pycache__|logs|log|packages|package\ cache|windows.old) return 0 ;;
-        microsoft|google|mozilla|chrome|firefox|edge|brave|opera|adobe|nvidia|intel|amd) return 0 ;;
-        dropbox|discord|slack|spotify|teams|zoom|skype|telegram|jetbrains|visual\ studio|vs\ code) return 0 ;;
-        npm|pip|nuget|docker|wsl|systemd|trash|pulse|pipewire|wireplumber|dconf|glib-2.0|flatpak|ibus|gnome-shell|nautilus|fish|zsh|bash) return 0 ;;
-        fontconfig|themes|icons|mime|locale|applications) return 0 ;;
+        windows*|winsxs*|\$recycle.bin*|system\ volume\ information*|recovery*|perflogs*|msocache*|config.msi*|\$winreagent*) return 0 ;;
+        program\ files*|program\ files\ \(x86\)*|installer*|temp*|tmp*|cache*|caches*|shadercache*|crashreports*|crashdumps*) return 0 ;;
+        node_modules*|.git*|.svn*|.hg*|__pycache__*|logs*|log*|packages*|package\ cache*|windows.old*) return 0 ;;
+        microsoft*|google*|mozilla*|chrome*|firefox*|edge*|brave*|opera*|adobe*|nvidia*|intel*|amd*) return 0 ;;
+        dropbox*|discord*|slack*|spotify*|teams*|zoom*|skype*|telegram*|jetbrains*|visual\ studio*|vs\ code*|vscode*|code*|cursor*|claude*|antigravity*|cherrystudio*|electron*|obs-studio*|arduino*|balena*) return 0 ;;
+        alacritty*|kitty*|foot*|ghostty*|hypr*|omarchy*|waybar*|rofi*|wofi*|systemd*|pulse*|pipewire*|wireplumber*|dconf*|glib-2.0*|flatpak*|ibus*|gnome*|nautilus*|fish*|zsh*|bash*) return 0 ;;
+        fontconfig*|themes*|icons*|mime*|locale*|applications*|autostart*|btop*|capacitor*|android*) return 0 ;;
         *) return 1 ;;
     esac
 }

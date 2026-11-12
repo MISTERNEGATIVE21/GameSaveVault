@@ -720,6 +720,53 @@ gsv_run_doctor() {
 # Interactive Dashboard Actions
 # ==============================================================================
 
+_gsv_ui_run_backup_for_games() {
+    local locations="$1"
+    local selected_games="$2"
+    local vault_path
+    vault_path="$(gsv_resolve_vault_path)"
+
+    local is_dry=0
+    if gsv_ui_confirm "Dry Run" "Perform a dry-run (simulation without copying files)?"; then
+        is_dry=1
+    fi
+
+    local label
+    label="$(gsv_ui_input "Snapshot Label" "Enter a label for this snapshot:" "manual-backup")"
+    [ -z "$label" ] && label="manual-backup"
+
+    # Filter locations JSON to selected games
+    local filtered_locations="[]"
+    local selected_json
+    if command -v jq >/dev/null 2>&1; then
+        selected_json="$(printf '%s\n' "$selected_games" | jq -R . | jq -s . 2>/dev/null)"
+        filtered_locations=$(echo "$locations" | jq --argjson sel "$selected_json" '[.[] | select((.GameName // .Game // .GameId // "") as $g | $sel | index($g))]' 2>/dev/null || echo "[]")
+    elif command -v python3 >/dev/null 2>&1; then
+        filtered_locations=$(python3 -c '
+import sys, json
+try:
+    locs = json.loads(sys.argv[1])
+    sel = set(line.strip() for line in sys.argv[2].splitlines() if line.strip())
+    filtered = [loc for loc in locs if (loc.get("GameName") or loc.get("Game") or loc.get("GameId")) in sel]
+    print(json.dumps(filtered))
+except Exception:
+    print("[]")
+' "$locations" "$selected_games" 2>/dev/null || echo "[]")
+    fi
+
+    gsv_create_snapshot "$filtered_locations" "$is_dry" "$label" "$vault_path"
+    local status=$?
+    if [ $status -eq 0 ]; then
+        if [ "$is_dry" -eq 1 ]; then
+            gsv_ui_message "Backup Dry Run Complete" "Dry run simulation completed successfully.\nNo files were copied." "info"
+        else
+            gsv_ui_message "Backup Complete" "Snapshot created successfully with label '$label'." "info"
+        fi
+    else
+        gsv_ui_message "Backup Failed" "Failed to create snapshot. Check logs for details." "error"
+    fi
+}
+
 _gsv_ui_action_scan_all() {
     gsv_ui_message "Scanning Games" "Scanning Steam Proton prefixes, native Linux games, Wine/Lutris prefixes, and emulators..." "info"
     local scan_results
@@ -731,7 +778,46 @@ _gsv_ui_action_scan_all() {
         count="$(python3 -c 'import sys, json; print(len(json.loads(sys.argv[1])))' "$scan_results" 2>/dev/null || echo 0)"
     fi
     gsv_update_scan_database "$scan_results"
-    gsv_ui_message "Scan Complete" "Discovered $count save location(s). Database updated successfully." "info"
+
+    if [ "$count" -eq 0 ]; then
+        gsv_ui_message "Scan Complete" "No game saves detected on standard paths.\nUse 'Scan Custom Folders' to scan a specific games directory." "info"
+        return 0
+    fi
+
+    local checklist_args=()
+    local tool="${GSV_JSON_TOOL:-jq}"
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
+        while IFS=$'\t' read -r name src p; do
+            if [ -n "$name" ] && [ "$name" != "null" ]; then
+                checklist_args+=("$name" "[$src] $p" "ON")
+            fi
+        done < <(echo "$scan_results" | jq -r '.[] | "\((.GameName // .Game // .GameId // "Unknown"))\t\((.Source // "Local"))\t\((.ResolvedPath // .AbsolutePath // .OriginalPath // ""))"' 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then
+        while IFS=$'\t' read -r name src p; do
+            if [ -n "$name" ] && [ "$name" != "null" ]; then
+                checklist_args+=("$name" "[$src] $p" "ON")
+            fi
+        done < <(python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.argv[1])
+    for item in data:
+        gn = item.get("GameName") or item.get("Game") or item.get("GameId") or "Unknown"
+        src = item.get("Source") or "Local"
+        op = item.get("ResolvedPath") or item.get("AbsolutePath") or item.get("OriginalPath") or ""
+        print(f"{gn}\t{src}\t{op}")
+except Exception:
+    pass
+' "$scan_results" 2>/dev/null)
+    fi
+
+    local chosen_games
+    chosen_games="$(gsv_ui_checklist "Discovered Games ($count found)" "Discovered $count save locations. Review games and select saves to back up now (or cancel to keep in database):" "${checklist_args[@]}")"
+    if [ $? -eq 0 ] && [ -n "$chosen_games" ]; then
+        if gsv_ui_confirm "Backup Selected Games" "Would you like to back up the selected games now?"; then
+            _gsv_ui_run_backup_for_games "$scan_results" "$chosen_games"
+        fi
+    fi
 }
 
 _gsv_ui_action_scan_custom() {
@@ -755,19 +841,44 @@ _gsv_ui_action_scan_custom() {
     fi
     if [ "$count" -gt 0 ]; then
         gsv_update_scan_database "$results"
-        gsv_ui_message "Scan Complete" "Found $count save location(s) in '$folder'. Database updated." "info"
+        local checklist_args=()
+        if command -v jq >/dev/null 2>&1; then
+            while IFS=$'\t' read -r name p; do
+                [ -n "$name" ] && [ "$name" != "null" ] && checklist_args+=("$name" "$p" "ON")
+            done < <(echo "$results" | jq -r '.[] | "\((.GameName // .Game // .GameId // "Unknown"))\t\((.ResolvedPath // .AbsolutePath // ""))"' 2>/dev/null)
+        elif command -v python3 >/dev/null 2>&1; then
+            while IFS=$'\t' read -r name p; do
+                [ -n "$name" ] && [ "$name" != "null" ] && checklist_args+=("$name" "$p" "ON")
+            done < <(python3 -c '
+import sys, json
+try:
+    for item in json.loads(sys.argv[1]):
+        gn = item.get("GameName") or item.get("Game") or item.get("GameId") or "Unknown"
+        op = item.get("ResolvedPath") or item.get("AbsolutePath") or ""
+        print(f"{gn}\t{op}")
+except Exception:
+    pass
+' "$results" 2>/dev/null)
+        fi
+
+        local chosen_games
+        chosen_games="$(gsv_ui_checklist "Discovered Saves in Folder ($count found)" "Found $count save locations in '$folder'. Select games to back up now (or cancel to keep in database):" "${checklist_args[@]}")"
+        if [ $? -eq 0 ] && [ -n "$chosen_games" ]; then
+            if gsv_ui_confirm "Backup Now" "Would you like to back up the selected games now?"; then
+                _gsv_ui_run_backup_for_games "$results" "$chosen_games"
+            fi
+        fi
     else
         gsv_ui_message "Scan Complete" "No game save files detected in '$folder'." "warning"
     fi
 }
 
-_gsv_ui_action_backup() {
-    local vault_path
-    vault_path="$(gsv_resolve_vault_path)"
-
+_gsv_ui_action_view_games() {
     local db_file="${GSV_CONFIG_DIR:-$GSV_ROOT/config}/scan-database.json"
     if [ ! -f "$db_file" ]; then
-        gsv_ui_message "No Scan Database" "No games in database. Please run a scan first." "warning"
+        if gsv_ui_confirm "No Scan Database" "No scan database exists yet. Would you like to scan for installed games now?"; then
+            _gsv_ui_action_scan_all
+        fi
         return 0
     fi
 
@@ -781,31 +892,100 @@ _gsv_ui_action_backup() {
     fi
 
     if [ "$count" -eq 0 ]; then
-        gsv_ui_message "Empty Database" "No game save locations found. Please run a scan first." "warning"
+        if gsv_ui_confirm "Empty Database" "No game saves currently in database. Would you like to scan for installed games now?"; then
+            _gsv_ui_action_scan_all
+        fi
         return 0
     fi
 
     local checklist_args=()
     local tool="${GSV_JSON_TOOL:-jq}"
     if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
-        while IFS=$'\t' read -r name p; do
-            if [ -n "$name" ]; then
-                checklist_args+=("$name" "$p" "ON")
+        while IFS=$'\t' read -r name src p; do
+            if [ -n "$name" ] && [ "$name" != "null" ]; then
+                checklist_args+=("$name" "[$src] $p" "ON")
             fi
-        done < <(echo "$locations" | jq -r '.[] | "\(.Game)\t\(.OriginalPath)"' 2>/dev/null)
+        done < <(echo "$locations" | jq -r '.[] | "\((.GameName // .Game // .GameId // "Unknown"))\t\((.Source // "Local"))\t\((.ResolvedPath // .AbsolutePath // .OriginalPath // ""))"' 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
-        while IFS=$'\t' read -r name p; do
-            if [ -n "$name" ]; then
-                checklist_args+=("$name" "$p" "ON")
+        while IFS=$'\t' read -r name src p; do
+            if [ -n "$name" ] && [ "$name" != "null" ]; then
+                checklist_args+=("$name" "[$src] $p" "ON")
             fi
         done < <(python3 -c '
 import sys, json
 try:
     data = json.loads(sys.argv[1])
     for item in data:
-        gn = item.get("Game") or "Unknown"
-        op = item.get("OriginalPath") or ""
-        print(f"{gn}\t{op}")
+        gn = item.get("GameName") or item.get("Game") or item.get("GameId") or "Unknown"
+        src = item.get("Source") or "Local"
+        op = item.get("ResolvedPath") or item.get("AbsolutePath") or item.get("OriginalPath") or ""
+        print(f"{gn}\t{src}\t{op}")
+except Exception:
+    pass
+' "$locations" 2>/dev/null)
+    fi
+
+    local chosen_games
+    chosen_games="$(gsv_ui_checklist "Tracked Games ($count total)" "Currently tracked game saves. Select games to back up (or cancel to return):" "${checklist_args[@]}")"
+    if [ $? -eq 0 ] && [ -n "$chosen_games" ]; then
+        if gsv_ui_confirm "Backup Selected Games" "Would you like to back up the selected games now?"; then
+            _gsv_ui_run_backup_for_games "$locations" "$chosen_games"
+        fi
+    fi
+}
+
+_gsv_ui_action_backup() {
+    local vault_path
+    vault_path="$(gsv_resolve_vault_path)"
+
+    local db_file="${GSV_CONFIG_DIR:-$GSV_ROOT/config}/scan-database.json"
+    if [ ! -f "$db_file" ]; then
+        if gsv_ui_confirm "No Scan Database" "No games recorded yet. Would you like to scan for installed games now?"; then
+            _gsv_ui_action_scan_all
+            return 0
+        fi
+        return 0
+    fi
+
+    local locations
+    locations="$(_gsv_parse_locations_to_array "$db_file")"
+    local count=0
+    if command -v jq >/dev/null 2>&1; then
+        count="$(echo "$locations" | jq '. | length' 2>/dev/null || echo 0)"
+    elif command -v python3 >/dev/null 2>&1; then
+        count="$(python3 -c 'import sys, json; print(len(json.loads(sys.argv[1])))' "$locations" 2>/dev/null || echo 0)"
+    fi
+
+    if [ "$count" -eq 0 ]; then
+        if gsv_ui_confirm "Empty Database" "No game saves currently in database. Would you like to scan for installed games now?"; then
+            _gsv_ui_action_scan_all
+            return 0
+        fi
+        return 0
+    fi
+
+    local checklist_args=()
+    local tool="${GSV_JSON_TOOL:-jq}"
+    if [ "$tool" = "jq" ] && command -v jq >/dev/null 2>&1; then
+        while IFS=$'\t' read -r name src p; do
+            if [ -n "$name" ] && [ "$name" != "null" ]; then
+                checklist_args+=("$name" "[$src] $p" "ON")
+            fi
+        done < <(echo "$locations" | jq -r '.[] | "\((.GameName // .Game // .GameId // "Unknown"))\t\((.Source // "Local"))\t\((.ResolvedPath // .AbsolutePath // .OriginalPath // ""))"' 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then
+        while IFS=$'\t' read -r name src p; do
+            if [ -n "$name" ] && [ "$name" != "null" ]; then
+                checklist_args+=("$name" "[$src] $p" "ON")
+            fi
+        done < <(python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.argv[1])
+    for item in data:
+        gn = item.get("GameName") or item.get("Game") or item.get("GameId") or "Unknown"
+        src = item.get("Source") or "Local"
+        op = item.get("ResolvedPath") or item.get("AbsolutePath") or item.get("OriginalPath") or ""
+        print(f"{gn}\t{src}\t{op}")
 except Exception:
     pass
 ' "$locations" 2>/dev/null)
@@ -817,50 +997,12 @@ except Exception:
     fi
 
     local selected_games
-    selected_games="$(gsv_ui_checklist "Backup Game Saves" "Select games to include in snapshot:" "${checklist_args[@]}")"
+    selected_games="$(gsv_ui_checklist "Backup Game Saves" "Select games to include in snapshot ($count available):" "${checklist_args[@]}")"
     if [ $? -ne 0 ] || [ -z "$selected_games" ]; then
         return 0
     fi
 
-    local is_dry=0
-    if gsv_ui_confirm "Dry Run" "Perform a dry-run (simulation without copying files)?"; then
-        is_dry=1
-    fi
-
-    local label
-    label="$(gsv_ui_input "Snapshot Label" "Enter a label for this snapshot:" "manual-backup")"
-    [ -z "$label" ] && label="manual-backup"
-
-    # Filter locations JSON to selected games
-    local filtered_locations="[]"
-    local selected_json
-    if command -v jq >/dev/null 2>&1; then
-        selected_json="$(printf '%s\n' "$selected_games" | jq -R . | jq -s . 2>/dev/null)"
-        filtered_locations=$(echo "$locations" | jq --argjson sel "$selected_json" '[.[] | select(.Game as $g | $sel | index($g))]' 2>/dev/null || echo "[]")
-    elif command -v python3 >/dev/null 2>&1; then
-        filtered_locations=$(python3 -c '
-import sys, json
-try:
-    locs = json.loads(sys.argv[1])
-    sel = set(line.strip() for line in sys.argv[2].splitlines() if line.strip())
-    filtered = [loc for loc in locs if loc.get("Game") in sel]
-    print(json.dumps(filtered))
-except Exception:
-    print("[]")
-' "$locations" "$selected_games" 2>/dev/null || echo "[]")
-    fi
-
-    gsv_create_snapshot "$filtered_locations" "$is_dry" "$label" "$vault_path"
-    local status=$?
-    if [ $status -eq 0 ]; then
-        if [ "$is_dry" -eq 1 ]; then
-            gsv_ui_message "Backup Dry Run Complete" "Dry run simulation completed successfully.\nNo files were copied." "info"
-        else
-            gsv_ui_message "Backup Complete" "Snapshot created successfully with label '$label'." "info"
-        fi
-    else
-        gsv_ui_message "Backup Failed" "Failed to create snapshot. Check logs for details." "error"
-    fi
+    _gsv_ui_run_backup_for_games "$locations" "$selected_games"
 }
 
 _gsv_ui_action_restore() {
@@ -1143,25 +1285,27 @@ gsv_launch_dashboard() {
         choice="$(gsv_ui_menu "$title" "$prompt" \
             "1" "Scan Installed Games & Prefixes" \
             "2" "Scan Custom Folders" \
-            "3" "Backup Saves" \
-            "4" "Restore Saves" \
-            "5" "Browse Snapshots" \
-            "6" "Configure Vault Location" \
-            "7" "Health Check / Doctor" \
-            "8" "Exit")"
+            "3" "View Tracked Games & Save Locations" \
+            "4" "Backup Saves" \
+            "5" "Restore Saves" \
+            "6" "Browse Snapshots" \
+            "7" "Configure Vault Location" \
+            "8" "Health Check / Doctor" \
+            "9" "Exit")"
         local status=$?
-        if [ $status -ne 0 ] || [ "$choice" = "8" ] || [ "${choice,,}" = "exit" ] || [ "${choice,,}" = "q" ] || [ "${choice,,}" = "quit" ]; then
+        if [ $status -ne 0 ] || [ "$choice" = "9" ] || [ "${choice,,}" = "exit" ] || [ "${choice,,}" = "q" ] || [ "${choice,,}" = "quit" ]; then
             break
         fi
 
         case "$choice" in
             1) _gsv_ui_action_scan_all ;;
             2) _gsv_ui_action_scan_custom ;;
-            3) _gsv_ui_action_backup ;;
-            4) _gsv_ui_action_restore ;;
-            5) _gsv_ui_action_browse_snapshots ;;
-            6) _gsv_ui_action_configure_vault ;;
-            7) _gsv_ui_action_doctor ;;
+            3) _gsv_ui_action_view_games ;;
+            4) _gsv_ui_action_backup ;;
+            5) _gsv_ui_action_restore ;;
+            6) _gsv_ui_action_browse_snapshots ;;
+            7) _gsv_ui_action_configure_vault ;;
+            8) _gsv_ui_action_doctor ;;
             *)
                 # Unknown choice, loop again
                 ;;

@@ -1228,10 +1228,46 @@ test_doctor_health_check() {
 }
 
 test_launch_dashboard_exit() {
-    # Option 8 is Exit in the main menu loop
-    printf "8\n" | GSV_UI_MODE="cli" gsv_launch_dashboard
+    # Option 9 is Exit in the main menu loop
+    printf "9\n" | GSV_UI_MODE="cli" gsv_launch_dashboard
     local status=$?
-    assert_equals "0" "$status" "Dashboard loop exits cleanly on option 8"
+    assert_equals "0" "$status" "Dashboard loop exits cleanly on option 9"
+}
+
+test_ui_action_backup_gamename_resolution() {
+    local mock_cfg="$TEST_TMP_DIR/mock_backup_ui_cfg"
+    local mock_vault="$TEST_TMP_DIR/mock_backup_ui_vault"
+    local mock_saves="$TEST_TMP_DIR/mock_backup_ui_saves"
+    mkdir -p "$mock_cfg" "$mock_saves/MyCustomGame" "$mock_vault"
+    echo '{"BackupRoot": "'"$mock_vault"'"}' > "$mock_cfg/settings.json"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    echo "save_content" > "$mock_saves/MyCustomGame/save.sav"
+
+    cat <<EOF > "$mock_cfg/scan-database.json"
+{
+  "Version": 1,
+  "Roots": [],
+  "Locations": [
+    {
+      "GameId": "custom-game-1",
+      "GameName": "MyCustomGame",
+      "Source": "Custom",
+      "ResolvedPath": "$mock_saves/MyCustomGame",
+      "FileCount": 1,
+      "Bytes": 12
+    }
+  ]
+}
+EOF
+
+    # In CLI mode, checklist prompts user to toggle/select. "1" toggles item 1, "done" completes selection.
+    # Then dry run prompt "y", snapshot label "ui-test-snap".
+    local out
+    out=$(printf "1\ndone\ny\nui-test-snap\n" | GSV_UI_MODE="cli" _gsv_ui_action_backup 2>&1)
+    local status=$?
+    assert_equals "0" "$status" "Backup UI action succeeds with GameName schema"
+    assert_match "MyCustomGame" "$out" "Checklist presents game name MyCustomGame"
 }
 
 test_ui_action_browse_snapshots_jq() {
@@ -1778,6 +1814,7 @@ run_test test_ui_dir_picker_cli "Headless CLI directory picker (gsv_ui_dir_picke
 run_test test_ui_input_cli "Headless CLI text input prompt (gsv_ui_input)"
 run_test test_doctor_health_check "Health check diagnostics (gsv_run_doctor)"
 run_test test_launch_dashboard_exit "Interactive dashboard main menu loop (gsv_launch_dashboard)"
+run_test test_ui_action_backup_gamename_resolution "Backup UI action with GameName schema (_gsv_ui_action_backup)"
 run_test test_ui_action_browse_snapshots_jq "Browse snapshots UI action with jq (_gsv_ui_action_browse_snapshots)"
 run_test test_ui_action_browse_snapshots_python "Browse snapshots UI action with python3 fallback (_gsv_ui_action_browse_snapshots)"
 run_test test_ui_action_restore_jq "Restore snapshot UI action with jq (_gsv_ui_action_restore)"
