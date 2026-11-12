@@ -661,6 +661,122 @@ test_scan_emulators() {
     assert_equals "Stardew Valley" "$ryu_name" "Ryujinx title resolved to Stardew Valley"
 }
 
+test_scan_eden() {
+    local mock_emu="$TEST_TMP_DIR/mock_eden"
+    # Flat layout: nand/user/save/<profile>/<title_id>
+    local eden_flat="$mock_emu/eden/nand/user/save/0000000000000000/0100e65002bb8000"
+    mkdir -p "$eden_flat"
+    echo "eden_stardew" > "$eden_flat/save.dat"
+
+    # Nested layout: nand/user/save/<profile>/<save_id>/<title_id>
+    local eden_nested="$mock_emu/eden/nand/user/save/0000000000000000/5F48D24BFFCC99081A58ABE9AE484898/0100a55003b5c000"
+    mkdir -p "$eden_nested"
+    echo "eden_cave_story" > "$eden_nested/save.dat"
+
+    local result
+    result="$(gsv_scan_emulators "$mock_emu")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Eden emulator scan is valid JSON"
+    local count
+    count="$(echo "$result" | jq '[.[] | select(.Source == "Emulator (Eden)")] | length')"
+    assert_equals "2" "$count" "Found 2 Eden save locations (flat and nested)"
+
+    # Profile owner 0000000000000000 must NOT be reported as a title
+    local bad_profile
+    bad_profile="$(echo "$result" | jq '[.[] | select(.AppId == "0000000000000000")] | length')"
+    assert_equals "0" "$bad_profile" "Profile owner folder must not be reported as a title"
+
+    local g1
+    g1="$(echo "$result" | jq -r '.[] | select(.AppId == "0100e65002bb8000") | .GameName')"
+    assert_equals "Stardew Valley" "$g1" "Eden flat title resolved to Stardew Valley"
+
+    local g2
+    g2="$(echo "$result" | jq -r '.[] | select(.AppId == "0100a55003b5c000") | .GameName')"
+    assert_equals "Cave Story+" "$g2" "Eden nested title resolved to Cave Story+"
+}
+
+test_scan_eglantine() {
+    local mock_emu="$TEST_TMP_DIR/mock_eglantine"
+    local eg_dir="$mock_emu/eglantine/nand/user/save/0000000000000000/5F48D24BFFCC99081A58ABE9AE484898/0100e65002bb8000"
+    mkdir -p "$eg_dir"
+    echo "eg_save" > "$eg_dir/save.dat"
+
+    local result
+    result="$(gsv_scan_emulators "$mock_emu")"
+    local count
+    count="$(echo "$result" | jq '[.[] | select(.Source == "Emulator (Eglantine)")] | length')"
+    assert_equals "1" "$count" "Found Eglantine save location"
+
+    local name
+    name="$(echo "$result" | jq -r '.[] | select(.Source == "Emulator (Eglantine)") | .GameName')"
+    assert_equals "Stardew Valley" "$name" "Eglantine save resolved to Stardew Valley"
+}
+
+test_scan_litchi() {
+    local mock_emu="$TEST_TMP_DIR/mock_litchi"
+    # Title ID folder in saves/
+    local l1="$mock_emu/litchi/saves/0100e65002bb8000/slot1"
+    mkdir -p "$l1"
+    echo "litchi_save" > "$l1/main"
+
+    # Named backup folder in backups/
+    local l2="$mock_emu/litchi/backups/CustomSwitchGame/2026-01-01"
+    mkdir -p "$l2"
+    echo "litchi_backup" > "$l2/save.dat"
+
+    local result
+    result="$(gsv_scan_emulators "$mock_emu")"
+    local count
+    count="$(echo "$result" | jq '[.[] | select(.Source == "Save Manager (Litchi)")] | length')"
+    assert_equals "2" "$count" "Found 2 Litchi save locations"
+
+    local name1
+    name1="$(echo "$result" | jq -r '.[] | select(.Source == "Save Manager (Litchi)" and .AppId == "0100e65002bb8000") | .GameName')"
+    assert_equals "Stardew Valley" "$name1" "Litchi title id resolved to Stardew Valley"
+
+    local name2
+    name2="$(echo "$result" | jq -r '.[] | select(.Source == "Save Manager (Litchi)" and .GameName == "CustomSwitchGame") | .GameName')"
+    assert_equals "CustomSwitchGame" "$name2" "Litchi custom name preserved"
+}
+
+test_scan_kyty_ps5() {
+    local mock_emu="$TEST_TMP_DIR/mock_kyty"
+    local k1="$mock_emu/kyty/_SaveData/PPSA01341"
+    mkdir -p "$k1"
+    echo "ps5_save" > "$k1/data.bin"
+
+    local k2="$mock_emu/kyty/_SaveData/CUSA00123"
+    mkdir -p "$k2"
+    echo "ps4_save" > "$k2/save.bin"
+
+    local result
+    result="$(gsv_scan_emulators "$mock_emu")"
+    local count
+    count="$(echo "$result" | jq '[.[] | select(.Source == "Emulator (Kyty PS5/PS4)")] | length')"
+    assert_equals "2" "$count" "Found 2 Kyty PS5/PS4 save locations"
+
+    local ps5_app
+    ps5_app="$(echo "$result" | jq -r '.[] | select(.AppId == "PPSA01341") | .AppId')"
+    assert_equals "PPSA01341" "$ps5_app" "Kyty PS5 AppID matched"
+}
+
+test_scan_shadps4() {
+    local mock_emu="$TEST_TMP_DIR/mock_shadps4"
+    local s1="$mock_emu/shadPS4/user/00000001/savedata/CUSA00001"
+    mkdir -p "$s1"
+    echo "shad_save" > "$s1/save.bin"
+
+    local result
+    result="$(gsv_scan_emulators "$mock_emu")"
+    local count
+    count="$(echo "$result" | jq '[.[] | select(.Source == "Emulator (shadPS4)")] | length')"
+    assert_equals "1" "$count" "Found shadPS4 save location"
+
+    local shad_app
+    shad_app="$(echo "$result" | jq -r '.[] | select(.Source == "Emulator (shadPS4)") | .AppId')"
+    assert_equals "CUSA00001" "$shad_app" "shadPS4 AppID matched"
+}
+
 test_deep_scan_folder() {
     local custom_root="$TEST_TMP_DIR/deep_scan_root"
     mkdir -p "$custom_root/GameAlpha/saves"
@@ -1227,6 +1343,57 @@ test_doctor_health_check() {
     assert_match "Vault Path" "$report_content" "Report checks Vault Path"
 }
 
+test_ui_timer_calculation() {
+    local now
+    now="$(_gsv_ui_now)"
+    assert_true "[ -n '$now' ]" "Timer now returned non-empty string"
+
+    local elapsed
+    elapsed="$(_gsv_ui_elapsed "100.0" "102.5")"
+    assert_equals "2.5s" "$elapsed" "Elapsed time calculated as 2.5s"
+
+    local elapsed_int
+    elapsed_int="$(_gsv_ui_elapsed "100" "103")"
+    assert_match "^3(\.0)?s$" "$elapsed_int" "Integer elapsed time formatted properly"
+}
+
+test_ui_action_scan_all_timing() {
+    local mock_cfg="$TEST_TMP_DIR/mock_scan_ui_cfg"
+    mkdir -p "$mock_cfg"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    eval "$(echo "orig_gsv_scan_all()"; declare -f gsv_scan_all | tail -n +2)"
+    gsv_scan_all() {
+        echo '[{"GameName": "MockGame", "Source": "Local", "ResolvedPath": "/tmp/mock"}]'
+    }
+
+    local out
+    out=$(printf "done\n" | GSV_UI_MODE="cli" _gsv_ui_action_scan_all 2>&1)
+    local status=$?
+
+    eval "$(echo "gsv_scan_all()"; declare -f orig_gsv_scan_all | tail -n +2)"
+
+    assert_equals "0" "$status" "Scan UI action completes cleanly"
+    assert_match "Scan completed in" "$out" "Output includes completion timing message"
+    assert_match "MockGame" "$out" "Output includes discovered game name"
+}
+
+test_ui_action_scan_custom_timing() {
+    local mock_cfg="$TEST_TMP_DIR/mock_scan_custom_cfg"
+    local mock_target="$TEST_TMP_DIR/mock_custom_target"
+    mkdir -p "$mock_cfg" "$mock_target/MyGame/saves"
+    echo "save" > "$mock_target/MyGame/saves/save.sav"
+    export GSV_CONFIG_DIR="$mock_cfg"
+
+    local out
+    out=$(printf "%s\ndone\n" "$mock_target" | GSV_UI_MODE="cli" _gsv_ui_action_scan_custom 2>&1)
+    local status=$?
+
+    assert_equals "0" "$status" "Scan custom UI action completes cleanly"
+    assert_match "Deep scan completed in" "$out" "Output includes deep scan timing message"
+    assert_match "MyGame" "$out" "Output includes discovered custom game"
+}
+
 test_launch_dashboard_exit() {
     # Option 9 is Exit in the main menu loop
     printf "9\n" | GSV_UI_MODE="cli" gsv_launch_dashboard
@@ -1790,6 +1957,11 @@ run_test test_title_lookup_special_characters "JSON escaping and title lookup wi
 run_test test_scan_native_games "Scan native Linux game saves (gsv_scan_native_games)"
 run_test test_scan_wine_lutris_heroic "Scan Wine, Lutris, and Heroic prefixes (gsv_scan_wine_lutris_heroic)"
 run_test test_scan_emulators "Scan emulator save paths (gsv_scan_emulators)"
+run_test test_scan_eden "Scan Eden Switch emulator saves (gsv_scan_emulators)"
+run_test test_scan_eglantine "Scan Eglantine Switch emulator saves (gsv_scan_emulators)"
+run_test test_scan_litchi "Scan Litchi Switch save manager saves (gsv_scan_emulators)"
+run_test test_scan_kyty_ps5 "Scan Kyty PS5/PS4 emulator saves (gsv_scan_emulators)"
+run_test test_scan_shadps4 "Scan shadPS4 PS4 emulator saves (gsv_scan_emulators)"
 run_test test_deep_scan_folder "Deep scan custom folder for save extensions (gsv_deep_scan_folder)"
 run_test test_update_scan_database "Update scan database JSON and schema compliance (gsv_update_scan_database)"
 run_test test_scan_all "Aggregate all scans (gsv_scan_all)"
@@ -1814,6 +1986,9 @@ run_test test_ui_dir_picker_cli "Headless CLI directory picker (gsv_ui_dir_picke
 run_test test_ui_input_cli "Headless CLI text input prompt (gsv_ui_input)"
 run_test test_doctor_health_check "Health check diagnostics (gsv_run_doctor)"
 run_test test_launch_dashboard_exit "Interactive dashboard main menu loop (gsv_launch_dashboard)"
+run_test test_ui_timer_calculation "Timer calculation and formatting (_gsv_ui_now / _gsv_ui_elapsed)"
+run_test test_ui_action_scan_all_timing "Scan all UI action with timing (_gsv_ui_action_scan_all)"
+run_test test_ui_action_scan_custom_timing "Scan custom UI action with timing (_gsv_ui_action_scan_custom)"
 run_test test_ui_action_backup_gamename_resolution "Backup UI action with GameName schema (_gsv_ui_action_backup)"
 run_test test_ui_action_browse_snapshots_jq "Browse snapshots UI action with jq (_gsv_ui_action_browse_snapshots)"
 run_test test_ui_action_browse_snapshots_python "Browse snapshots UI action with python3 fallback (_gsv_ui_action_browse_snapshots)"

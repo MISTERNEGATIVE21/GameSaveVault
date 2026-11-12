@@ -247,6 +247,8 @@ GameSaveVault automatically detects your environment and presents the best user 
 2. **Whiptail TUI (Terminal)**: When running in a terminal session without a graphical desktop (such as an SSH connection, text console, or headless server), GameSaveVault automatically uses `whiptail` (or `dialog`) for fast ncurses-based terminal dialogs.
 3. **CLI Fallback**: If neither `zenity` nor `whiptail` is installed, GameSaveVault provides a clean, colored ANSI text menu and interactive command-line prompts.
 
+All interfaces feature **animated loading feedback** during scans (`zenity --progress --pulsate`, TUI infoboxes, and CLI status indicators) with precise **elapsed scan timing** reported upon completion.
+
 You can explicitly force an interface mode using CLI flags or the `GSV_UI_MODE` environment variable:
 
 ```bash
@@ -350,12 +352,23 @@ GameSaveVault on Linux scans standard paths across gaming runtimes and emulators
    - Heroic Games Launcher: `~/.config/heroic/Prefixes/` and Flatpak `~/.var/app/com.heroicgameslauncher.hgl/`
    - Bottles: `~/.var/app/com.usebottles.bottles/data/bottles/bottles/*/drive_c/users/*`
 
-4. **Console Emulators**:
-   - **Ryujinx / Eden (Nintendo Switch)**: `~/.config/Ryujinx/bis/user/save/`
-   - **RPCS3 (PlayStation 3)**: `~/.config/rpcs3/dev_hdd0/home/00000001/savedata/`
-   - **PCSX2 (PlayStation 2)**: `~/.config/PCSX2/memcards/`
-   - **Dolphin (GameCube & Wii)**: `~/.local/share/dolphin-emu/GC/` and `~/.local/share/dolphin-emu/Wii/`
-   - **DuckStation (PlayStation 1)**: `~/.local/share/duckstation/memcards/`
+4. **Console Emulators & Save Managers**:
+   - **Nintendo Switch**:
+     - **Ryujinx**: `~/.config/Ryujinx/bis/user/save/` and Flatpak `org.ryujinx.Ryujinx`
+     - **Eden**: `~/.config/eden/`, `~/.local/share/eden/`, Flatpak `io.github.edenteam.Eden`, and Wine prefixes (`nand/user/save/`, `bis/user/save/`)
+     - **Eglantine**: `~/.config/eglantine/`, `~/.config/Eglantine/`, `~/.local/share/eglantine/`
+     - **Litchi / Litchii (Switch Save Manager)**: `~/.config/litchi/`, `~/.local/share/litchi/`, `~/Litchi/`, `~/Emulation/saves/litchi/` (supports title IDs and named save backups)
+   - **PlayStation 5 & PlayStation 4**:
+     - **Kyty / KytyPS5 (PS5 & PS4)**: `~/.config/kyty/`, `~/.config/KytyPS5/`, `_SaveData/`, `savedata/` (`PPSA*`, `CUSA*` title IDs)
+     - **shadPS4 (PS4)**: `~/.config/shadPS4/`, `user/*/savedata/`, `savedata/` (`CUSA*`, `PPSA*` title IDs)
+     - **Spine & RPCSX (PS4/PS5)**: `~/.config/spine/`, `~/.config/rpcsx/` (`savedata/`, `save/`)
+     - **RPCS3 (PS3)**: `~/.config/rpcs3/dev_hdd0/home/00000001/savedata/`
+     - **PCSX2 (PS2)**: `~/.config/PCSX2/memcards/`
+     - **DuckStation (PS1)**: `~/.local/share/duckstation/memcards/`
+   - **Nintendo GameCube & Wii**:
+     - **Dolphin**: `~/.local/share/dolphin-emu/GC/` and `~/.local/share/dolphin-emu/Wii/`
+   - **Multi-System**:
+     - **RetroArch**: `~/.config/retroarch/saves/` and Flatpak `org.libretro.RetroArch`
 
 ---
 

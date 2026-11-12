@@ -702,6 +702,352 @@ gsv_scan_wine_lutris_heroic() {
 gsv_scan_emulators() {
     local emu_base="${1:-}"
 
+    _scan_switch_tree() {
+        local save_root="$1"
+        local emu_id="$2"
+        local emu_display="$3"
+        [ ! -d "$save_root" ] && return 0
+
+        local prof
+        for prof in "$save_root"/*; do
+            [ ! -d "$prof" ] && continue
+            local item
+            for item in "$prof"/*; do
+                [ ! -d "$item" ] && continue
+                local iname="$(basename "$item")"
+
+                # Check if direct title ID (16 hex chars, not all 0s)
+                if [[ "$iname" =~ ^[0-9a-fA-F]{16}$ ]] && [[ ! "$iname" =~ ^0{16}$ ]]; then
+                    local fc bytes
+                    read -r fc bytes <<< "$(_gsv_measure_path "$item")"
+                    if [ "$fc" -gt 0 ]; then
+                        local gname
+                        gname="$(gsv_lookup_title_name "$iname")"
+                        if [ -z "$gname" ] || [ "$gname" = "AppID $iname" ]; then
+                            gname="Switch Title $iname"
+                        fi
+                        local rel_p
+                        rel_p="$(gsv_path_to_token "$item")"
+                        local tok="XDG_CONFIG_HOME" rel=""
+                        if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                            tok="${BASH_REMATCH[1]}"
+                            rel="${BASH_REMATCH[3]:-}"
+                        fi
+                        _gsv_create_location_json \
+                            "${emu_id}-${iname,,}" \
+                            "$gname" \
+                            "$emu_display" \
+                            "$iname" \
+                            "$tok" \
+                            "$rel" \
+                            "$item" \
+                            "Directory" \
+                            "${emu_display} save" \
+                            "emulator" \
+                            "$save_root" \
+                            "$fc" \
+                            "$bytes"
+                    fi
+                else
+                    # Might be nested save id directory (e.g. 32-hex save ID containing 16-hex title)
+                    local sub
+                    for sub in "$item"/*; do
+                        [ ! -d "$sub" ] && continue
+                        local sub_name="$(basename "$sub")"
+                        if [[ "$sub_name" =~ ^[0-9a-fA-F]{16}$ ]] && [[ ! "$sub_name" =~ ^0{16}$ ]]; then
+                            local fc bytes
+                            read -r fc bytes <<< "$(_gsv_measure_path "$sub")"
+                            if [ "$fc" -gt 0 ]; then
+                                local gname
+                                gname="$(gsv_lookup_title_name "$sub_name")"
+                                if [ -z "$gname" ] || [ "$gname" = "AppID $sub_name" ]; then
+                                    gname="Switch Title $sub_name"
+                                fi
+                                local rel_p
+                                rel_p="$(gsv_path_to_token "$sub")"
+                                local tok="XDG_CONFIG_HOME" rel=""
+                                if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                                    tok="${BASH_REMATCH[1]}"
+                                    rel="${BASH_REMATCH[3]:-}"
+                                fi
+                                _gsv_create_location_json \
+                                    "${emu_id}-${sub_name,,}" \
+                                    "$gname" \
+                                    "$emu_display" \
+                                    "$sub_name" \
+                                    "$tok" \
+                                    "$rel" \
+                                    "$sub" \
+                                    "Directory" \
+                                    "${emu_display} save" \
+                                    "emulator" \
+                                    "$save_root" \
+                                    "$fc" \
+                                    "$bytes"
+                            fi
+                        fi
+                    done
+                fi
+            done
+        done
+    }
+
+    _scan_eden() {
+        local eden_root="$1"
+        [ ! -d "$eden_root" ] && return 0
+        local sub
+        for sub in "nand/user/save" "nand/system/save" "bis/user/save" "bis/system/save"; do
+            if [ -d "$eden_root/$sub" ]; then
+                _scan_switch_tree "$eden_root/$sub" "eden" "Emulator (Eden)"
+            fi
+        done
+    }
+
+    _scan_eglantine() {
+        local eg_root="$1"
+        [ ! -d "$eg_root" ] && return 0
+        local sub
+        for sub in "nand/user/save" "nand/system/save" "bis/user/save" "bis/system/save"; do
+            if [ -d "$eg_root/$sub" ]; then
+                _scan_switch_tree "$eg_root/$sub" "eglantine" "Emulator (Eglantine)"
+            fi
+        done
+    }
+
+    _scan_litchi() {
+        local litchi_root="$1"
+        [ ! -d "$litchi_root" ] && return 0
+        local sdirs=()
+        local sub
+        for sub in "saves" "backups" "backup" "save"; do
+            if [ -d "$litchi_root/$sub" ]; then
+                sdirs+=("$litchi_root/$sub")
+            fi
+        done
+        if [ ${#sdirs[@]} -eq 0 ]; then
+            sdirs+=("$litchi_root")
+        fi
+
+        local sdir
+        for sdir in "${sdirs[@]}"; do
+            local entry
+            for entry in "$sdir"/*; do
+                [ ! -d "$entry" ] && continue
+                local ename="$(basename "$entry")"
+                [[ "$ename" =~ ^\. ]] && continue
+                local fc bytes
+                read -r fc bytes <<< "$(_gsv_measure_path "$entry")"
+                if [ "$fc" -gt 0 ]; then
+                    local gname="$ename"
+                    local app_id=""
+                    if [[ "$ename" =~ ^[0-9a-fA-F]{16}$ ]]; then
+                        app_id="$ename"
+                        local looked_up
+                        looked_up="$(gsv_lookup_title_name "$ename")"
+                        if [ -n "$looked_up" ] && [ "$looked_up" != "AppID $ename" ]; then
+                            gname="$looked_up"
+                        else
+                            gname="Switch Title $ename"
+                        fi
+                    fi
+                    local rel_p
+                    rel_p="$(gsv_path_to_token "$entry")"
+                    local tok="XDG_DATA_HOME" rel=""
+                    if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                        tok="${BASH_REMATCH[1]}"
+                        rel="${BASH_REMATCH[3]:-}"
+                    fi
+                    local clean_id="litchi-$(echo "$ename" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+                    _gsv_create_location_json \
+                        "${clean_id#-}" \
+                        "$gname" \
+                        "Save Manager (Litchi)" \
+                        "$app_id" \
+                        "$tok" \
+                        "$rel" \
+                        "$entry" \
+                        "Directory" \
+                        "Litchi Switch save backup" \
+                        "save-manager" \
+                        "$litchi_root" \
+                        "$fc" \
+                        "$bytes"
+                fi
+            done
+        done
+    }
+
+    _scan_kyty() {
+        local kyty_root="$1"
+        [ ! -d "$kyty_root" ] && return 0
+        local save_roots=()
+        local sub
+        for sub in "_SaveData" "savedata" "SaveData"; do
+            if [ -d "$kyty_root/$sub" ]; then
+                save_roots+=("$kyty_root/$sub")
+            fi
+        done
+        if [ ${#save_roots[@]} -eq 0 ]; then
+            save_roots+=("$kyty_root")
+        fi
+
+        local sroot
+        for sroot in "${save_roots[@]}"; do
+            local title_dir
+            for title_dir in "$sroot"/*; do
+                [ ! -d "$title_dir" ] && continue
+                local tid="$(basename "$title_dir")"
+                if [[ "$tid" =~ ^(PPSA|CUSA)[0-9]{4,6}$ ]] || [ "$sroot" != "$kyty_root" ]; then
+                    local fc bytes
+                    read -r fc bytes <<< "$(_gsv_measure_path "$title_dir")"
+                    if [ "$fc" -gt 0 ]; then
+                        local gname
+                        gname="$(gsv_lookup_title_name "$tid")"
+                        if [ -z "$gname" ] || [ "$gname" = "AppID $tid" ]; then
+                            if [[ "$tid" =~ ^[pP][pP][sS][aA] ]]; then
+                                gname="PS5 Game $tid"
+                            elif [[ "$tid" =~ ^[cC][uU][sS][aA] ]]; then
+                                gname="PS4 Game $tid"
+                            else
+                                gname="PlayStation Save $tid"
+                            fi
+                        fi
+                        local rel_p
+                        rel_p="$(gsv_path_to_token "$title_dir")"
+                        local tok="XDG_CONFIG_HOME" rel=""
+                        if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                            tok="${BASH_REMATCH[1]}"
+                            rel="${BASH_REMATCH[3]:-}"
+                        fi
+                        _gsv_create_location_json \
+                            "kyty-${tid,,}" \
+                            "$gname" \
+                            "Emulator (Kyty PS5/PS4)" \
+                            "$tid" \
+                            "$tok" \
+                            "$rel" \
+                            "$title_dir" \
+                            "Directory" \
+                            "Kyty PS5/PS4 save" \
+                            "emulator" \
+                            "$kyty_root" \
+                            "$fc" \
+                            "$bytes"
+                    fi
+                fi
+            done
+        done
+    }
+
+    _scan_shadps4() {
+        local shad_root="$1"
+        [ ! -d "$shad_root" ] && return 0
+        local save_dirs=()
+        if [ -d "$shad_root/user" ]; then
+            local u
+            for u in "$shad_root/user"/*; do
+                if [ -d "$u/savedata" ]; then
+                    save_dirs+=("$u/savedata")
+                fi
+            done
+        fi
+        if [ -d "$shad_root/savedata" ]; then
+            save_dirs+=("$shad_root/savedata")
+        fi
+
+        local sdir
+        for sdir in "${save_dirs[@]}"; do
+            local title_dir
+            for title_dir in "$sdir"/*; do
+                [ ! -d "$title_dir" ] && continue
+                local tid="$(basename "$title_dir")"
+                local fc bytes
+                read -r fc bytes <<< "$(_gsv_measure_path "$title_dir")"
+                if [ "$fc" -gt 0 ]; then
+                    local gname
+                    gname="$(gsv_lookup_title_name "$tid")"
+                    if [ -z "$gname" ] || [ "$gname" = "AppID $tid" ]; then
+                        if [[ "$tid" =~ ^[pP][pP][sS][aA] ]]; then
+                            gname="PS5 Game $tid"
+                        elif [[ "$tid" =~ ^[cC][uU][sS][aA] ]]; then
+                            gname="PS4 Game $tid"
+                        else
+                            gname="shadPS4 Save $tid"
+                        fi
+                    fi
+                    local rel_p
+                    rel_p="$(gsv_path_to_token "$title_dir")"
+                    local tok="XDG_CONFIG_HOME" rel=""
+                    if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                        tok="${BASH_REMATCH[1]}"
+                        rel="${BASH_REMATCH[3]:-}"
+                    fi
+                    _gsv_create_location_json \
+                        "shadps4-${tid,,}" \
+                        "$gname" \
+                        "Emulator (shadPS4)" \
+                        "$tid" \
+                        "$tok" \
+                        "$rel" \
+                        "$title_dir" \
+                        "Directory" \
+                        "shadPS4 save" \
+                        "emulator" \
+                        "$shad_root" \
+                        "$fc" \
+                        "$bytes"
+                fi
+            done
+        done
+    }
+
+    _scan_spine_rpcsx() {
+        local emu_root="$1"
+        local emu_id="$2"
+        local emu_name="$3"
+        [ ! -d "$emu_root" ] && return 0
+
+        local sdir
+        for sdir in "$emu_root/savedata" "$emu_root/save"; do
+            [ ! -d "$sdir" ] && continue
+            local title_dir
+            for title_dir in "$sdir"/*; do
+                [ ! -d "$title_dir" ] && continue
+                local tid="$(basename "$title_dir")"
+                local fc bytes
+                read -r fc bytes <<< "$(_gsv_measure_path "$title_dir")"
+                if [ "$fc" -gt 0 ]; then
+                    local gname
+                    gname="$(gsv_lookup_title_name "$tid")"
+                    if [ -z "$gname" ] || [ "$gname" = "AppID $tid" ]; then
+                        gname="${emu_name} $tid"
+                    fi
+                    local rel_p
+                    rel_p="$(gsv_path_to_token "$title_dir")"
+                    local tok="XDG_CONFIG_HOME" rel=""
+                    if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                        tok="${BASH_REMATCH[1]}"
+                        rel="${BASH_REMATCH[3]:-}"
+                    fi
+                    _gsv_create_location_json \
+                        "${emu_id}-${tid,,}" \
+                        "$gname" \
+                        "Emulator (${emu_name})" \
+                        "$tid" \
+                        "$tok" \
+                        "$rel" \
+                        "$title_dir" \
+                        "Directory" \
+                        "${emu_name} save" \
+                        "emulator" \
+                        "$emu_root" \
+                        "$fc" \
+                        "$bytes"
+                fi
+            done
+        done
+    }
+
     _scan_ryujinx() {
         local ryu_root="$1"
         [ ! -d "$ryu_root" ] && return 0
@@ -883,9 +1229,60 @@ gsv_scan_emulators() {
             _scan_dolphin "$emu_base/dolphin-emu"
             _scan_duckstation "$emu_base/duckstation"
             _scan_retroarch "$emu_base/retroarch"
+            _scan_eden "$emu_base/eden"
+            _scan_eglantine "$emu_base/eglantine"
+            _scan_eglantine "$emu_base/Eglantine"
+            _scan_litchi "$emu_base/litchi"
+            _scan_litchi "$emu_base/litchii"
+            _scan_kyty "$emu_base/kyty"
+            _scan_kyty "$emu_base/KytyPS5"
+            _scan_shadps4 "$emu_base/shadPS4"
+            _scan_shadps4 "$emu_base/shadps4"
+            _scan_spine_rpcsx "$emu_base/spine" "spine" "Spine"
+            _scan_spine_rpcsx "$emu_base/rpcsx" "rpcsx" "RPCSX"
         else
             _scan_ryujinx "$HOME/.config/Ryujinx/bis/user/save"
             _scan_ryujinx "$HOME/.var/app/org.ryujinx.Ryujinx/config/Ryujinx/bis/user/save"
+            _scan_eden "$HOME/.config/eden"
+            _scan_eden "$HOME/.local/share/eden"
+            _scan_eden "$HOME/.var/app/io.github.edenteam.Eden/config/eden"
+            _scan_eden "$HOME/.var/app/io.github.edenteam.Eden/data/eden"
+            _scan_eden "$HOME/.wine/drive_c/users/${USER:-user}/AppData/Roaming/eden" 2>/dev/null || true
+            _scan_eglantine "$HOME/.config/eglantine"
+            _scan_eglantine "$HOME/.config/Eglantine"
+            _scan_eglantine "$HOME/.local/share/eglantine"
+            _scan_eglantine "$HOME/.local/share/Eglantine"
+            _scan_eglantine "$HOME/.wine/drive_c/users/${USER:-user}/AppData/Roaming/Eglantine" 2>/dev/null || true
+            _scan_litchi "$HOME/.config/litchi"
+            _scan_litchi "$HOME/.config/Litchi"
+            _scan_litchi "$HOME/.config/litchii"
+            _scan_litchi "$HOME/.config/Litchii"
+            _scan_litchi "$HOME/.local/share/litchi"
+            _scan_litchi "$HOME/.local/share/litchii"
+            _scan_litchi "$HOME/Litchi"
+            _scan_litchi "$HOME/Litchii"
+            _scan_litchi "$HOME/Emulation/saves/litchi"
+            _scan_kyty "$HOME/.config/kyty"
+            _scan_kyty "$HOME/.config/KytyPS5"
+            _scan_kyty "$HOME/.config/kytyps5"
+            _scan_kyty "$HOME/.local/share/kyty"
+            _scan_kyty "$HOME/.local/share/KytyPS5"
+            _scan_kyty "$HOME/KytyPS5"
+            _scan_kyty "$HOME/kyty"
+            _scan_kyty "$HOME/.wine/drive_c/users/${USER:-user}/AppData/Roaming/Kyty" 2>/dev/null || true
+            _scan_kyty "$HOME/.wine/drive_c/users/${USER:-user}/AppData/Roaming/KytyPS5" 2>/dev/null || true
+            _scan_shadps4 "$HOME/.config/shadPS4"
+            _scan_shadps4 "$HOME/.config/shadps4"
+            _scan_shadps4 "$HOME/.local/share/shadPS4"
+            _scan_shadps4 "$HOME/.local/share/shadps4"
+            _scan_shadps4 "$HOME/.var/app/net.shadps4.shadPS4/config/shadPS4"
+            _scan_shadps4 "$HOME/.var/app/net.shadps4.shadPS4/data/shadPS4"
+            _scan_shadps4 "$HOME/.wine/drive_c/users/${USER:-user}/AppData/Roaming/shadPS4" 2>/dev/null || true
+            _scan_spine_rpcsx "$HOME/.config/spine" "spine" "Spine"
+            _scan_spine_rpcsx "$HOME/.local/share/spine" "spine" "Spine"
+            _scan_spine_rpcsx "$HOME/spine" "spine" "Spine"
+            _scan_spine_rpcsx "$HOME/.config/rpcsx" "rpcsx" "RPCSX"
+            _scan_spine_rpcsx "$HOME/.local/share/rpcsx" "rpcsx" "RPCSX"
             _scan_rpcs3 "$HOME/.config/rpcs3"
             _scan_rpcs3 "$HOME/.var/app/net.rpcs3.RPCS3/config/rpcs3"
             _scan_pcsx2 "$HOME/.config/PCSX2"

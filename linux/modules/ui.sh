@@ -767,10 +767,75 @@ except Exception:
     fi
 }
 
+# ==============================================================================
+# Timer Helpers for Scan Operations
+# ==============================================================================
+
+_gsv_ui_now() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import time; print(f"{time.time():.4f}")' 2>/dev/null || date +%s
+    else
+        date +%s
+    fi
+}
+
+_gsv_ui_elapsed() {
+    local t_start="${1:-0}"
+    local t_end="${2:-0}"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import sys
+try:
+    s = float(sys.argv[1])
+    e = float(sys.argv[2])
+    diff = max(0.0, e - s)
+    print(f"{diff:.1f}s")
+except Exception:
+    print("0.0s")
+' "$t_start" "$t_end" 2>/dev/null || echo "$(( t_end - t_start ))s"
+    else
+        local diff=$(( t_end - t_start ))
+        [ "$diff" -lt 0 ] && diff=0
+        echo "${diff}s"
+    fi
+}
+
 _gsv_ui_action_scan_all() {
-    gsv_ui_message "Scanning Games" "Scanning Steam Proton prefixes, native Linux games, Wine/Lutris prefixes, and emulators..." "info"
+    local mode
+    mode="$(gsv_ui_detect)"
+    local tmp_scan
+    tmp_scan="$(mktemp /tmp/gsv-scan.XXXXXX)"
+    local start_time
+    start_time="$(_gsv_ui_now)"
+
+    if [ "$mode" = "zenity" ]; then
+        (
+            gsv_scan_all > "$tmp_scan" 2>/dev/null
+        ) &
+        local scan_pid=$!
+        while kill -0 "$scan_pid" 2>/dev/null; do
+            sleep 0.1
+            echo "# Scanning Steam Proton, Native games, Wine/Lutris prefixes, and Emulators..."
+        done | zenity --progress --pulsate --title="Scanning Game Saves" \
+                      --text="Scanning Steam Proton prefixes, native Linux games, Wine prefixes, and emulators...\nPlease wait..." \
+                      --auto-close --no-cancel 2>/dev/null || true
+        wait "$scan_pid" 2>/dev/null || true
+    elif [ "$mode" = "whiptail" ] || [ "$mode" = "dialog" ]; then
+        whiptail --infobox "Scanning Steam Proton prefixes, native Linux games, Wine prefixes, and emulators...\nPlease wait..." 8 68 2>/dev/null || true
+        gsv_scan_all > "$tmp_scan" 2>/dev/null
+    else
+        echo -e "\033[0;34m[*] Scanning for game saves (Proton, native games, Wine, emulators)...\033[0m"
+        gsv_scan_all > "$tmp_scan" 2>/dev/null
+    fi
+
+    local end_time
+    end_time="$(_gsv_ui_now)"
+    local elapsed
+    elapsed="$(_gsv_ui_elapsed "$start_time" "$end_time")"
     local scan_results
-    scan_results="$(gsv_scan_all)"
+    scan_results="$(cat "$tmp_scan" 2>/dev/null || echo "[]")"
+    rm -f "$tmp_scan" 2>/dev/null || true
+
     local count=0
     if command -v jq >/dev/null 2>&1; then
         count="$(echo "$scan_results" | jq '. | length' 2>/dev/null || echo 0)"
@@ -779,8 +844,12 @@ _gsv_ui_action_scan_all() {
     fi
     gsv_update_scan_database "$scan_results"
 
+    if [ "$mode" = "cli" ]; then
+        echo -e "\033[0;32m[✓] Scan completed in $elapsed! Discovered $count save location(s).\033[0m"
+    fi
+
     if [ "$count" -eq 0 ]; then
-        gsv_ui_message "Scan Complete" "No game saves detected on standard paths.\nUse 'Scan Custom Folders' to scan a specific games directory." "info"
+        gsv_ui_message "Scan Complete ($elapsed)" "Scan finished in $elapsed.\nNo game saves detected on standard paths.\nUse 'Scan Custom Folders' to scan a specific games directory." "info"
         return 0
     fi
 
@@ -812,7 +881,7 @@ except Exception:
     fi
 
     local chosen_games
-    chosen_games="$(gsv_ui_checklist "Discovered Games ($count found)" "Discovered $count save locations. Review games and select saves to back up now (or cancel to keep in database):" "${checklist_args[@]}")"
+    chosen_games="$(gsv_ui_checklist "Discovered Games ($count found in $elapsed)" "Discovered $count save location(s) in $elapsed. Review games and select saves to back up now (or cancel to keep in database):" "${checklist_args[@]}")"
     if [ $? -eq 0 ] && [ -n "$chosen_games" ]; then
         if gsv_ui_confirm "Backup Selected Games" "Would you like to back up the selected games now?"; then
             _gsv_ui_run_backup_for_games "$scan_results" "$chosen_games"
@@ -830,15 +899,53 @@ _gsv_ui_action_scan_custom() {
         gsv_ui_message "Error" "Folder '$folder' does not exist." "error"
         return 0
     fi
-    gsv_ui_message "Scanning Folder" "Deep scanning '$folder' for game saves..." "info"
+
+    local mode
+    mode="$(gsv_ui_detect)"
+    local tmp_scan
+    tmp_scan="$(mktemp /tmp/gsv-scan-custom.XXXXXX)"
+    local start_time
+    start_time="$(_gsv_ui_now)"
+
+    if [ "$mode" = "zenity" ]; then
+        (
+            gsv_deep_scan_folder "$folder" > "$tmp_scan" 2>/dev/null
+        ) &
+        local scan_pid=$!
+        while kill -0 "$scan_pid" 2>/dev/null; do
+            sleep 0.1
+            echo "# Deep scanning '$folder' for game saves..."
+        done | zenity --progress --pulsate --title="Deep Scanning Folder" \
+                      --text="Deep scanning '$folder' for game saves...\nPlease wait..." \
+                      --auto-close --no-cancel 2>/dev/null || true
+        wait "$scan_pid" 2>/dev/null || true
+    elif [ "$mode" = "whiptail" ] || [ "$mode" = "dialog" ]; then
+        whiptail --infobox "Deep scanning '$folder' for game saves...\nPlease wait..." 8 68 2>/dev/null || true
+        gsv_deep_scan_folder "$folder" > "$tmp_scan" 2>/dev/null
+    else
+        echo -e "\033[0;34m[*] Deep scanning '$folder' for game saves...\033[0m"
+        gsv_deep_scan_folder "$folder" > "$tmp_scan" 2>/dev/null
+    fi
+
+    local end_time
+    end_time="$(_gsv_ui_now)"
+    local elapsed
+    elapsed="$(_gsv_ui_elapsed "$start_time" "$end_time")"
     local results
-    results="$(gsv_deep_scan_folder "$folder")"
+    results="$(cat "$tmp_scan" 2>/dev/null || echo "[]")"
+    rm -f "$tmp_scan" 2>/dev/null || true
+
     local count=0
     if command -v jq >/dev/null 2>&1; then
         count="$(echo "$results" | jq '. | length' 2>/dev/null || echo 0)"
     elif command -v python3 >/dev/null 2>&1; then
         count="$(python3 -c 'import sys, json; print(len(json.loads(sys.argv[1])))' "$results" 2>/dev/null || echo 0)"
     fi
+
+    if [ "$mode" = "cli" ]; then
+        echo -e "\033[0;32m[✓] Deep scan completed in $elapsed! Discovered $count save location(s).\033[0m"
+    fi
+
     if [ "$count" -gt 0 ]; then
         gsv_update_scan_database "$results"
         local checklist_args=()
@@ -862,14 +969,14 @@ except Exception:
         fi
 
         local chosen_games
-        chosen_games="$(gsv_ui_checklist "Discovered Saves in Folder ($count found)" "Found $count save locations in '$folder'. Select games to back up now (or cancel to keep in database):" "${checklist_args[@]}")"
+        chosen_games="$(gsv_ui_checklist "Discovered Saves in Folder ($count found in $elapsed)" "Found $count save location(s) in '$folder' in $elapsed. Select games to back up now (or cancel to keep in database):" "${checklist_args[@]}")"
         if [ $? -eq 0 ] && [ -n "$chosen_games" ]; then
             if gsv_ui_confirm "Backup Now" "Would you like to back up the selected games now?"; then
                 _gsv_ui_run_backup_for_games "$results" "$chosen_games"
             fi
         fi
     else
-        gsv_ui_message "Scan Complete" "No game save files detected in '$folder'." "warning"
+        gsv_ui_message "Scan Complete ($elapsed)" "Scan finished in $elapsed.\nNo game save files detected in '$folder'." "warning"
     fi
 }
 
