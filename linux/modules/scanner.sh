@@ -438,6 +438,72 @@ _gsv_scan_wine_user_saves() {
     fi
 }
 
+_gsv_scan_wine_scene_saves() {
+    local drive_c="$1"
+    local appid="${2:-}"
+    local title="${3:-}"
+    local origin="${4:-proton}"
+    local scan_root="${5:-}"
+    [ ! -d "$drive_c" ] && return 0
+
+    local scene_dirs=(
+        "$drive_c/users/Public/Documents/Steam/CODEX"
+        "$drive_c/users/Public/Documents/Steam/RUNE"
+        "$drive_c/users/Public/Documents/Steam/PLAZA"
+        "$drive_c/users/Public/Documents/Steam/ALI213"
+        "$drive_c/users/Public/Documents/Steam/FLT"
+        "$drive_c/users/Public/Documents/EMPRESS"
+        "$drive_c/ProgramData/Steam/CODEX"
+        "$drive_c/ProgramData/Steam/RUNE"
+    )
+
+    local sdir
+    for sdir in "${scene_dirs[@]}"; do
+        [ ! -d "$sdir" ] && continue
+        local target_app
+        for target_app in "$sdir"/*; do
+            [ ! -d "$target_app" ] && continue
+            local aid="$(basename "$target_app")"
+            local fc bytes
+            read -r fc bytes <<< "$(_gsv_measure_path "$target_app")"
+            if [ "$fc" -gt 0 ]; then
+                local gname=""
+                if [[ "$aid" =~ ^[0-9]+$ ]]; then
+                    gname="$(gsv_lookup_title_name "$aid")"
+                fi
+                if [ -z "$gname" ] || [ "$gname" = "AppID $aid" ]; then
+                    if [ -n "$title" ] && [ "$title" != "AppID $appid" ]; then
+                        gname="$title"
+                    else
+                        gname="$(basename "$sdir") $aid"
+                    fi
+                fi
+                local rel_p
+                rel_p="$(gsv_path_to_token "$target_app")"
+                local tok="PUBLICDOCS" rel=""
+                if [[ "$rel_p" =~ ^%([A-Z0-9_]+)%(/(.*))?$ ]]; then
+                    tok="${BASH_REMATCH[1]}"
+                    rel="${BASH_REMATCH[3]:-}"
+                fi
+                _gsv_create_location_json \
+                    "scene-${aid,,}" \
+                    "$gname" \
+                    "Scene/Emulator Save" \
+                    "$aid" \
+                    "$tok" \
+                    "$rel" \
+                    "$target_app" \
+                    "Directory" \
+                    "Scene / Emulator game save" \
+                    "scene" \
+                    "$scan_root" \
+                    "$fc" \
+                    "$bytes"
+            fi
+        done
+    done
+}
+
 # ------------------------------------------------------------------------------
 # 1. Steam Proton Scanner (Native & Flatpak)
 # ------------------------------------------------------------------------------
@@ -477,30 +543,117 @@ gsv_scan_steam_proton() {
             local steamapps_dir
             steamapps_dir="$(dirname "$root")"
 
-            local appid_dir
-            for appid_dir in "$root"/*; do
-                [ ! -d "$appid_dir" ] && continue
-                local appid
-                appid="$(basename "$appid_dir")"
-                # Steam AppIDs must be numeric
-                [[ ! "$appid" =~ ^[0-9]+$ ]] && continue
+            local prefix_list=()
+            if [ -d "$root/pfx/drive_c" ]; then
+                prefix_list+=("$root")
+            else
+                for appid_dir in "$root"/*; do
+                    [ -d "$appid_dir/pfx/drive_c" ] && prefix_list+=("$appid_dir")
+                done
+            fi
 
-                # Review Focus 2: Ignore broken/incomplete prefixes gracefully
+            for appid_dir in "${prefix_list[@]}"; do
+                local appid="$(basename "$appid_dir")"
                 local drive_c="$appid_dir/pfx/drive_c"
                 [ ! -d "$drive_c" ] && continue
                 local users_dir="$drive_c/users"
-                [ ! -d "$users_dir" ] && continue
 
-                local title
-                title="$(gsv_lookup_title_name "$appid" "$steamapps_dir")"
+                local title=""
+                if [[ "$appid" =~ ^[0-9]+$ ]]; then
+                    title="$(gsv_lookup_title_name "$appid" "$steamapps_dir")"
+                fi
 
-                local udir
-                for udir in "$users_dir"/*; do
-                    [ ! -d "$udir" ] && continue
-                    local uname
-                    uname="$(basename "$udir")"
-                    [ "$uname" = "Public" ] || [ "$uname" = "Default" ] && continue
-                    _gsv_scan_wine_user_saves "$udir" "SteamProton" "$appid" "$title" "proton" "$root"
+                if [ -d "$users_dir" ]; then
+                    local udir
+                    for udir in "$users_dir"/*; do
+                        [ ! -d "$udir" ] && continue
+                        local uname
+                        uname="$(basename "$udir")"
+                        [ "$uname" = "Public" ] || [ "$uname" = "Default" ] && continue
+                        _gsv_scan_wine_user_saves "$udir" "SteamProton" "$appid" "$title" "proton" "$root"
+                    done
+                fi
+
+                _gsv_scan_wine_scene_saves "$drive_c" "$appid" "$title" "proton" "$root"
+            done
+        done
+    } | _gsv_json_lines_to_array
+}
+
+# ------------------------------------------------------------------------------
+# 1b. Steam Cloud / UserData Scanner
+# ------------------------------------------------------------------------------
+gsv_scan_steam_userdata() {
+    local -a roots=("$@")
+    if [ ${#roots[@]} -eq 0 ]; then
+        roots=(
+            "$HOME/.steam/steam/userdata"
+            "$HOME/.local/share/Steam/userdata"
+            "$HOME/.steam/root/userdata"
+            "$HOME/.var/app/com.valvesoftware.Steam/.steam/steam/userdata"
+            "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/userdata"
+        )
+        local lf
+        for lf in "$HOME/.steam/steam/steamapps/libraryfolders.vdf" \
+                  "$HOME/.local/share/Steam/steamapps/libraryfolders.vdf" \
+                  "$HOME/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps/libraryfolders.vdf"; do
+            if [ -f "$lf" ]; then
+                while IFS= read -r lib_path; do
+                    if [ -n "$lib_path" ]; then
+                        [ -d "$lib_path/userdata" ] && roots+=("$lib_path/userdata")
+                        [ -d "$lib_path/steamapps/../userdata" ] && roots+=("$lib_path/steamapps/../userdata")
+                    fi
+                done < <(grep -oP '"path"\s*"\K[^"]+' "$lf" 2>/dev/null || true)
+            fi
+        done
+    fi
+
+    {
+        local root
+        for root in "${roots[@]}"; do
+            [ ! -d "$root" ] && continue
+            local acct_dir
+            for acct_dir in "$root"/*; do
+                [ ! -d "$acct_dir" ] && continue
+                local acct_id="$(basename "$acct_dir")"
+                [[ ! "$acct_id" =~ ^[0-9]+$ ]] && continue
+
+                local app_dir
+                for app_dir in "$acct_dir"/*; do
+                    [ ! -d "$app_dir" ] && continue
+                    local app_id="$(basename "$app_dir")"
+                    [[ ! "$app_id" =~ ^[0-9]+$ ]] && continue
+                    [ "$app_id" = "7" ] || [ "$app_id" = "0" ] && continue
+
+                    local save_target="$app_dir"
+                    if [ -d "$app_dir/remote" ]; then
+                        save_target="$app_dir/remote"
+                    fi
+
+                    local fc bytes
+                    read -r fc bytes <<< "$(_gsv_measure_path "$save_target")"
+                    if [ "$fc" -gt 0 ]; then
+                        local gname
+                        gname="$(gsv_lookup_title_name "$app_id" "$(dirname "$root")/steamapps")"
+                        if [ -z "$gname" ] || [ "$gname" = "AppID $app_id" ]; then
+                            gname="Steam App $app_id"
+                        fi
+
+                        _gsv_create_location_json \
+                            "steam-userdata-$app_id" \
+                            "$gname" \
+                            "Steam UserData" \
+                            "$app_id" \
+                            "STEAMUSERDATA" \
+                            "$acct_id/$app_id" \
+                            "$save_target" \
+                            "Directory" \
+                            "Steam cloud/userdata save" \
+                            "steam" \
+                            "$root" \
+                            "$fc" \
+                            "$bytes"
+                    fi
                 done
             done
         done
@@ -511,6 +664,7 @@ gsv_scan_steam_proton() {
 # 2. Native Games Scanner
 # ------------------------------------------------------------------------------
 gsv_scan_native_games() {
+    local is_custom_roots=$#
     local share_dir="${1:-${XDG_DATA_HOME:-$HOME/.local/share}}"
     local config_dir="${2:-${XDG_CONFIG_HOME:-$HOME/.config}}"
 
@@ -570,9 +724,117 @@ gsv_scan_native_games() {
         done
     }
 
+    _scan_native_unity() {
+        local u_dir="$config_dir/unity3d"
+        [ ! -d "$u_dir" ] && return 0
+        local company
+        for company in "$u_dir"/*; do
+            [ ! -d "$company" ] && continue
+            local cname="$(basename "$company")"
+            _gsv_is_pruned "$cname" && continue
+            local product
+            for product in "$company"/*; do
+                [ ! -d "$product" ] && continue
+                local pname="$(basename "$product")"
+                _gsv_is_pruned "$pname" && continue
+                local fc bytes
+                read -r fc bytes <<< "$(_gsv_measure_path "$product")"
+                if [ "$fc" -gt 0 ]; then
+                    local slug
+                    slug="$(echo "$pname" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+                    _gsv_create_location_json \
+                        "unity-${slug#-}" \
+                        "$pname" \
+                        "Native (Unity)" \
+                        "" \
+                        "XDG_CONFIG_HOME" \
+                        "unity3d/$cname/$pname" \
+                        "$product" \
+                        "Directory" \
+                        "Unity3D native Linux save" \
+                        "native" \
+                        "$u_dir" \
+                        "$fc" \
+                        "$bytes"
+                fi
+            done
+        done
+    }
+
+    _scan_native_godot() {
+        local g_dir="$share_dir/godot/app_userdata"
+        [ ! -d "$g_dir" ] && return 0
+        local game
+        for game in "$g_dir"/*; do
+            [ ! -d "$game" ] && continue
+            local gname="$(basename "$game")"
+            _gsv_is_pruned "$gname" && continue
+            local fc bytes
+            read -r fc bytes <<< "$(_gsv_measure_path "$game")"
+            if [ "$fc" -gt 0 ]; then
+                local slug
+                slug="$(echo "$gname" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+                _gsv_create_location_json \
+                    "godot-${slug#-}" \
+                    "$gname" \
+                    "Native (Godot)" \
+                    "" \
+                    "XDG_DATA_HOME" \
+                    "godot/app_userdata/$gname" \
+                    "$game" \
+                    "Directory" \
+                    "Godot native Linux save" \
+                    "native" \
+                    "$g_dir" \
+                    "$fc" \
+                    "$bytes"
+            fi
+        done
+    }
+
+    _scan_native_renpy() {
+        local r_dir="${GSV_RENPY_DIR:-}"
+        if [ -z "$r_dir" ]; then
+            if [ "$is_custom_roots" -gt 0 ]; then
+                return 0
+            fi
+            r_dir="$HOME/.renpy"
+        fi
+        [ ! -d "$r_dir" ] && return 0
+        local vn
+        for vn in "$r_dir"/*; do
+            [ ! -d "$vn" ] && continue
+            local vname="$(basename "$vn")"
+            _gsv_is_pruned "$vname" && continue
+            local fc bytes
+            read -r fc bytes <<< "$(_gsv_measure_path "$vn")"
+            if [ "$fc" -gt 0 ]; then
+                local slug
+                slug="$(echo "$vname" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+                _gsv_create_location_json \
+                    "renpy-${slug#-}" \
+                    "$vname" \
+                    "Native (RenPy)" \
+                    "" \
+                    "HOME" \
+                    ".renpy/$vname" \
+                    "$vn" \
+                    "Directory" \
+                    "RenPy visual novel save" \
+                    "native" \
+                    "$r_dir" \
+                    "$fc" \
+                    "$bytes"
+            fi
+        done
+    }
+
     {
         _scan_native_dir "$share_dir" "XDG_DATA_HOME"
         _scan_native_dir "$config_dir" "XDG_CONFIG_HOME"
+        _scan_native_unity
+        _scan_native_godot
+        _scan_native_renpy
     } | _gsv_json_lines_to_array
 }
 
@@ -1319,17 +1581,31 @@ _gsv_deep_walk() {
     local dlower="${dname,,}"
 
     # 1. Directory literally named save / saves / savedata / etc.
-    if [[ "$dlower" =~ ^(save|saves|savedata|savegames|gamesaves)$ ]]; then
+    if [[ "$dlower" =~ ^(save|saves|savedata|savegames|gamesaves|saved|savegame|playerprofiles|profiles|profile)$ ]]; then
         local parent_dir
         parent_dir="$(dirname "$dir")"
-        game_name="$(basename "$parent_dir")"
+        local parent_name="$(basename "$parent_dir")"
+        if [ "${parent_name,,}" = "saved" ]; then
+            game_name="$(basename "$(dirname "$parent_dir")")"
+        else
+            game_name="$parent_name"
+        fi
+        is_save_dir=1
+    elif [ -d "$dir/Saved/SaveGames" ] || [ -d "$dir/saved/savegames" ]; then
+        game_name="$dname"
+        if [ -d "$dir/Saved/SaveGames" ]; then
+            dir="$dir/Saved/SaveGames"
+        else
+            dir="$dir/saved/savegames"
+        fi
         is_save_dir=1
     else
         # 2. Directory contains save file extensions directly
         local match_save_files
         match_save_files="$(find "$dir" -maxdepth 1 -type f \( \
-            -iname "*.sav" -o -iname "*.save" -o -iname "*.sl2" -o -iname "*.srm" \
-            -o -iname "*.state" -o -iname "*.dat" \
+            -iname "*.sav" -o -iname "*.save" -o -iname "*.savegame" -o -iname "*.sl2" \
+            -o -iname "*.srm" -o -iname "*.state" -o -iname "*.dat" -o -iname "*.bin" \
+            -o -iname "*.slot" -o -iname "*.profile" -o -iname "*.rpyc" \
         \) 2>/dev/null | head -n 1)"
         if [ -n "$match_save_files" ]; then
             game_name="$dname"
@@ -1396,11 +1672,12 @@ gsv_deep_scan_folder() {
 # 6. Aggregate All Scans
 # ------------------------------------------------------------------------------
 gsv_scan_all() {
-    local proton native wine emu
+    local proton native wine emu userdata
     proton="$(gsv_scan_steam_proton)"
     native="$(gsv_scan_native_games)"
     wine="$(gsv_scan_wine_lutris_heroic)"
     emu="$(gsv_scan_emulators)"
+    userdata="$(gsv_scan_steam_userdata)"
 
     local tool="${GSV_JSON_TOOL:-}"
     if [ -z "$tool" ] || [ "$tool" = "none" ]; then
@@ -1415,7 +1692,7 @@ gsv_scan_all() {
         jq -s '
             [.[][]] |
             unique_by(.ResolvedPath // .AbsolutePath)
-        ' <(echo "$proton") <(echo "$native") <(echo "$wine") <(echo "$emu") 2>/dev/null || echo "[]"
+        ' <(echo "$proton") <(echo "$native") <(echo "$wine") <(echo "$emu") <(echo "$userdata") 2>/dev/null || echo "[]"
     else
         python3 -c '
 import sys, json
@@ -1436,7 +1713,7 @@ for arg in sys.argv[1:]:
         pass
 
 print(json.dumps(results, indent=2))
-' "$proton" "$native" "$wine" "$emu" 2>/dev/null || echo "[]"
+' "$proton" "$native" "$wine" "$emu" "$userdata" 2>/dev/null || echo "[]"
     fi
 }
 

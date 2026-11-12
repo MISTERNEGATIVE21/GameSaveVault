@@ -243,9 +243,9 @@ chmod +x gamevault.sh
 
 GameSaveVault automatically detects your environment and presents the best user interface available:
 
-1. **Zenity GUI (Desktop)**: When running inside a graphical desktop session (GNOME, KDE Plasma, XFCE, Cinnamon, Hyprland, etc. with `$DISPLAY` or `$WAYLAND_DISPLAY`), GameSaveVault opens native desktop dialogs, folder browsers, and checklists using `zenity`.
-2. **Whiptail TUI (Terminal)**: When running in a terminal session without a graphical desktop (such as an SSH connection, text console, or headless server), GameSaveVault automatically uses `whiptail` (or `dialog`) for fast ncurses-based terminal dialogs.
-3. **CLI Fallback**: If neither `zenity` nor `whiptail` is installed, GameSaveVault provides a clean, colored ANSI text menu and interactive command-line prompts.
+1. **Zenity GUI (Desktop)**: When running inside a graphical desktop session (GNOME, KDE Plasma, XFCE, Cinnamon, Hyprland, etc. with `$DISPLAY` or `$WAYLAND_DISPLAY`), GameSaveVault opens native desktop dialogs, folder browsers, and checklists using `zenity`. Includes dedicated **Select All** and **Select None** buttons for rapid batch selection.
+2. **Whiptail TUI (Terminal)**: When running in a terminal session without a graphical desktop (such as an SSH connection, text console, or headless server), GameSaveVault automatically uses `whiptail` (or `dialog`) for fast ncurses-based terminal dialogs. Features dedicated **`[★ SELECT ALL GAMES]`** and **`[☆ DESELECT ALL GAMES]`** one-key action tags.
+3. **CLI Fallback**: If neither `zenity` nor `whiptail` is installed, GameSaveVault provides a clean, colored ANSI text menu and interactive command-line prompts supporting fast selections: `all` (`a`), `none` (`n`), numeric ranges (e.g. `1-4`), and lists (e.g. `1,3,5`).
 
 All interfaces feature **animated loading feedback** during scans (`zenity --progress --pulsate`, TUI infoboxes, and CLI status indicators) with precise **elapsed scan timing** reported upon completion.
 
@@ -311,7 +311,7 @@ When games are installed in custom drives or folders (e.g. `/mnt/Games`, `/opt/g
   ./gamevault.sh scan-folders --dirs "/mnt/Games:/home/user/CustomSaves"
   ```
 - **GUI / TUI Folder Browser**: Run `./gamevault.sh scan-folders` without arguments, or choose **Scan Custom Folders...** in the interactive dashboard. A directory chooser dialog will open allowing you to select any directory.
-- **Deep Scan Heuristics**: The scanner traverses folders recursively up to depth 8 searching for known save markers (`.sav`, `.save`, `.dat`, `.bin`, `.sl2`, `savedata/`, `savegames/`), groups them by parent folder, and adds them to `config/scan-database.json`.
+- **Deep Scan Heuristics**: The scanner traverses folders recursively up to depth 8 searching for known save markers (`.sav`, `.save`, `.savegame`, `.dat`, `.bin`, `.sl2`, `.slot`, `.profile`, `.rpyc`, `.sqlite`, `.sqlite3`, `Saved/SaveGames`, `savedata/`, `savegames/`), groups them by parent folder, and adds them to `config/scan-database.json`.
 
 #### Selective Restore with Collision Rollback
 - **Select Specific Games**: Restore only the titles you need using `--game "<name>"`:
@@ -330,7 +330,7 @@ When games are installed in custom drives or folders (e.g. `/mnt/Games`, `/opt/g
 
 GameSaveVault on Linux scans standard paths across gaming runtimes and emulators:
 
-1. **Steam Proton (Native & Flatpak)**:
+1. **Steam Proton & Steam Userdata (Native & Flatpak)**:
    - Native Steam: `~/.steam/steam/steamapps/compatdata/<appid>/pfx/drive_c/` and `~/.local/share/Steam/steamapps/compatdata/...`
    - Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/.steam/steam/steamapps/compatdata/<appid>/pfx/drive_c/`
    - Scanned paths inside Proton prefixes:
@@ -339,12 +339,16 @@ GameSaveVault on Linux scans standard paths across gaming runtimes and emulators
      - `users/steamuser/AppData/Roaming/`
      - `users/steamuser/Documents/My Games/` and `users/steamuser/Documents/`
      - `users/steamuser/Saved Games/`
-   - Steam Userdata Cloud Saves: `~/.steam/steam/userdata/<account_id>/<app_id>/`
+   - Steam Userdata Cloud Saves: `~/.steam/steam/userdata/<account_id>/<app_id>/remote` across all detected Steam library drives (parsed from `libraryfolders.vdf`)
+   - Scene & Emulated Steam Saves: Automatically detects scene releases inside Proton and Wine prefixes under `users/Public/Documents/Steam/` (`CODEX`, `RUNE`, `PLAZA`, `ALI213`, `FLT`, `EMPRESS`), `drive_c/ProgramData/Steam/`, and `AppData/Roaming/Goldberg SteamEmu Saves`
    - Steam App IDs are mapped to game names using `data/title-names.json` and Steam manifests.
 
-2. **Native Linux Games**:
+2. **Native Linux Games & Game Engines**:
    - `~/.local/share/<GameName>/`
    - `~/.config/<GameName>/`
+   - **Unity 3D Engine**: `~/.config/unity3d/<company>/<product>`
+   - **Godot Engine**: `~/.local/share/godot/app_userdata/<game>`
+   - **Ren'Py Visual Novels**: `~/.renpy/<game>`
 
 3. **Wine, Lutris, Heroic & Bottles**:
    - Wine Default Prefix: `~/.wine/drive_c/users/$USER/`

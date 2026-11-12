@@ -448,39 +448,62 @@ gsv_ui_checklist() {
 
     case "$mode" in
         zenity)
-            local zargs=(--list --checklist --title="$title" --text="$prompt" --column="Select" --column="Tag" --column="Description" --print-column=2 --separator=$'\n' --height=450 --width=620)
-            for ((i=0; i<${#tags[@]}; i++)); do
-                local zstatus="FALSE"
-                [ "${statuses[i]}" = "ON" ] && zstatus="TRUE"
-                zargs+=("$zstatus" "${tags[i]}" "${descs[i]}")
+            local cur_statuses=("${statuses[@]}")
+            while true; do
+                local zargs=(--list --checklist --title="$title" --text="$prompt" --column="Select" --column="Tag" --column="Description" --print-column=2 --separator=$'\n' --height=450 --width=620)
+                zargs+=(--extra-button="Select All" --extra-button="Select None")
+                for ((i=0; i<${#tags[@]}; i++)); do
+                    local zstatus="FALSE"
+                    [ "${cur_statuses[i]}" = "ON" ] && zstatus="TRUE"
+                    zargs+=("$zstatus" "${tags[i]}" "${descs[i]}")
+                done
+                local res
+                res=$(zenity "${zargs[@]}" 2>/dev/null)
+                local status=$?
+                if [ "$res" = "Select All" ]; then
+                    for ((i=0; i<${#tags[@]}; i++)); do cur_statuses[i]="ON"; done
+                    continue
+                elif [ "$res" = "Select None" ]; then
+                    for ((i=0; i<${#tags[@]}; i++)); do cur_statuses[i]="OFF"; done
+                    continue
+                fi
+                if [ $status -ne 0 ]; then
+                    return 1
+                fi
+                echo "$res"
+                return 0
             done
-            local res
-            res=$(zenity "${zargs[@]}" 2>/dev/null)
-            local status=$?
-            if [ $status -ne 0 ]; then
-                return 1
-            fi
-            echo "$res"
-            return 0
             ;;
         whiptail|dialog)
             local tool="$mode"
             local count=${#tags[@]}
-            local list_h=$(( count + 2 ))
-            [ "$list_h" -gt 15 ] && list_h=15
-            local box_h=$(( list_h + 8 ))
-            local targs=()
-            for ((i=0; i<count; i++)); do
-                targs+=("${tags[i]}" "${descs[i]}" "${statuses[i]}")
+            local cur_statuses=("${statuses[@]}")
+            while true; do
+                local list_h=$(( count + 4 ))
+                [ "$list_h" -gt 16 ] && list_h=16
+                local box_h=$(( list_h + 8 ))
+                local targs=()
+                targs+=("__SELECT_ALL__" "[★ SELECT ALL GAMES]" "OFF")
+                targs+=("__SELECT_NONE__" "[☆ DESELECT ALL GAMES]" "OFF")
+                for ((i=0; i<count; i++)); do
+                    targs+=("${tags[i]}" "${descs[i]}" "${cur_statuses[i]}")
+                done
+                local res
+                res=$("$tool" --title "$title" --separate-output --checklist "$prompt" "$box_h" 76 "$list_h" "${targs[@]}" 3>&1 1>&2 2>&3)
+                local status=$?
+                if [ $status -ne 0 ]; then
+                    return 1
+                fi
+                if echo "$res" | grep -qx "__SELECT_ALL__"; then
+                    for ((i=0; i<count; i++)); do cur_statuses[i]="ON"; done
+                    continue
+                elif echo "$res" | grep -qx "__SELECT_NONE__"; then
+                    for ((i=0; i<count; i++)); do cur_statuses[i]="OFF"; done
+                    continue
+                fi
+                echo "$res" | grep -vFx -e "__SELECT_ALL__" -e "__SELECT_NONE__"
+                return 0
             done
-            local res
-            res=$("$tool" --title "$title" --separate-output --checklist "$prompt" "$box_h" 74 "$list_h" "${targs[@]}" 3>&1 1>&2 2>&3)
-            local status=$?
-            if [ $status -ne 0 ]; then
-                return 1
-            fi
-            echo "$res"
-            return 0
             ;;
         *)
             # cli
@@ -491,7 +514,7 @@ gsv_ui_checklist() {
                 [ "${statuses[i]}" = "ON" ] && mark="X"
                 printf "  [%s] %b%2d)%b %s (%s)\n" "$mark" "\033[1;32m" "$((i + 1))" "\033[0m" "${tags[i]}" "${descs[i]}" >&2
             done
-            printf "\nEnter selection (numbers like 1,2 or 'all', 'none', Enter for defaults) [all/none/1-%d]: " "${#tags[@]}" >&2
+            printf "\nEnter selection (numbers like '1,2', range '1-3', 'all'/'a', 'none'/'n', Enter for defaults) [all/none/1-%d]: " "${#tags[@]}" >&2
 
             local input
             if ! IFS= read -r input; then
@@ -504,7 +527,7 @@ gsv_ui_checklist() {
             fi
 
             input="$(echo "$input" | tr -d ' ')"
-            if [ -z "$input" ]; then
+            if [ -z "$input" ] || [ "${input,,}" = "done" ]; then
                 for ((i=0; i<${#tags[@]}; i++)); do
                     if [ "${statuses[i]}" = "ON" ]; then
                         echo "${tags[i]}"
@@ -513,20 +536,29 @@ gsv_ui_checklist() {
                 return 0
             fi
 
-            if [ "${input,,}" = "all" ]; then
+            if [ "${input,,}" = "all" ] || [ "${input,,}" = "a" ] || [ "$input" = "*" ]; then
                 for ((i=0; i<${#tags[@]}; i++)); do
                     echo "${tags[i]}"
                 done
                 return 0
             fi
 
-            if [ "${input,,}" = "none" ]; then
+            if [ "${input,,}" = "none" ] || [ "${input,,}" = "n" ]; then
                 return 0
             fi
 
             IFS=',' read -ra parts <<< "$input"
             for p in "${parts[@]}"; do
-                if [[ "$p" =~ ^[0-9]+$ ]]; then
+                if [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    local r_start="${BASH_REMATCH[1]}"
+                    local r_end="${BASH_REMATCH[2]}"
+                    for ((r=r_start; r<=r_end; r++)); do
+                        local idx=$(( r - 1 ))
+                        if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#tags[@]}" ]; then
+                            echo "${tags[idx]}"
+                        fi
+                    done
+                elif [[ "$p" =~ ^[0-9]+$ ]]; then
                     local idx=$(( p - 1 ))
                     if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#tags[@]}" ]; then
                         echo "${tags[idx]}"

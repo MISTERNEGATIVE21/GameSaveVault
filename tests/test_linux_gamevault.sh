@@ -1293,20 +1293,128 @@ test_ui_checklist_cli() {
     assert_match "GameC" "$selected" "Selected contains GameC"
     assert_true "[[ ! '$selected' =~ 'GameB' ]]" "Selected does not contain GameB"
 
+    # Selection by range (e.g. 1-2)
+    selected=$(printf "1-2\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "OFF" "GameB" "Path B" "OFF" "GameC" "Path C" "OFF")
+    assert_match "GameA" "$selected" "Range contains GameA"
+    assert_match "GameB" "$selected" "Range contains GameB"
+    assert_true "[[ ! '$selected' =~ 'GameC' ]]" "Range does not contain GameC"
+
     # Selection by default (Enter takes items marked ON/TRUE)
     selected=$(printf "\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "ON" "GameB" "Path B" "OFF" "GameC" "Path C" "TRUE")
     assert_match "GameA" "$selected" "Default contains GameA"
     assert_match "GameC" "$selected" "Default contains GameC"
     assert_true "[[ ! '$selected' =~ 'GameB' ]]" "Default does not contain GameB"
 
-    # Selection by "all"
-    selected=$(printf "all\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "OFF" "GameB" "Path B" "OFF")
-    assert_match "GameA" "$selected" "'all' contains GameA"
-    assert_match "GameB" "$selected" "'all' contains GameB"
+    # Selection by "all" / "a"
+    selected=$(printf "a\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "OFF" "GameB" "Path B" "OFF")
+    assert_match "GameA" "$selected" "'a' contains GameA"
+    assert_match "GameB" "$selected" "'a' contains GameB"
 
-    # Selection by "none"
-    selected=$(printf "none\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "ON" "GameB" "Path B" "ON")
-    assert_equals "" "$selected" "'none' returns empty selection"
+    # Selection by "none" / "n"
+    selected=$(printf "n\n" | GSV_UI_MODE="cli" gsv_ui_checklist "Game Select" "Select games:" "GameA" "Path A" "ON" "GameB" "Path B" "ON")
+    assert_equals "" "$selected" "'n' returns empty selection"
+}
+
+test_scan_steam_userdata() {
+    local mock_steam="$TEST_TMP_DIR/mock_steam_userdata"
+    local acct_dir="$mock_steam/userdata/12345678"
+    mkdir -p "$mock_steam/steamapps"
+    cat <<'EOF' > "$mock_steam/steamapps/appmanifest_413150.acf"
+"AppState"
+{
+    "appid" "413150"
+    "name" "Stardew Valley"
+}
+EOF
+    local app_dir="$acct_dir/413150/remote"
+    mkdir -p "$app_dir"
+    echo "cloud_save_content" > "$app_dir/Farmer_123"
+
+    local result
+    result="$(gsv_scan_steam_userdata "$mock_steam/userdata")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Steam userdata scan is valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "1" "$count" "Found 1 Steam userdata save location"
+
+    local name
+    name="$(echo "$result" | jq -r '.[0].GameName')"
+    assert_equals "Stardew Valley" "$name" "Steam userdata title resolved to Stardew Valley"
+
+    local source
+    source="$(echo "$result" | jq -r '.[0].Source')"
+    assert_equals "Steam UserData" "$source" "Source marked as Steam UserData"
+}
+
+test_scan_scene_saves() {
+    local mock_pfx="$TEST_TMP_DIR/mock_scene_prefix"
+    local codex_dir="$mock_pfx/pfx/drive_c/users/Public/Documents/Steam/CODEX/413150"
+    mkdir -p "$codex_dir"
+    echo "codex_save" > "$codex_dir/save.bin"
+
+    local result
+    result="$(gsv_scan_steam_proton "$mock_pfx")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Scene scan in proton prefix is valid JSON"
+    local count
+    count="$(echo "$result" | jq '[.[] | select(.Source == "Scene/Emulator Save")] | length')"
+    assert_equals "1" "$count" "Found 1 CODEX scene save under Public/Documents"
+}
+
+test_scan_native_game_engines() {
+    local mock_share="$TEST_TMP_DIR/mock_engine_share"
+    local mock_cfg="$TEST_TMP_DIR/mock_engine_cfg"
+    local mock_renpy="$TEST_TMP_DIR/mock_engine_renpy"
+
+    # Unity 3D native Linux save (~/.config/unity3d/<company>/<game>)
+    local unity_dir="$mock_cfg/unity3d/TeamCherry/Hollow Knight"
+    mkdir -p "$unity_dir"
+    echo "hollow_knight_save" > "$unity_dir/user1.dat"
+
+    # Godot native save (~/.local/share/godot/app_userdata/<game>)
+    local godot_dir="$mock_share/godot/app_userdata/Brotato"
+    mkdir -p "$godot_dir"
+    echo "brotato_save" > "$godot_dir/save.json"
+
+    # Ren'Py save (~/.renpy/<game>)
+    local renpy_dir="$mock_renpy/DokiDoki"
+    mkdir -p "$renpy_dir"
+    echo "renpy_save" > "$renpy_dir/1-LT1.save"
+
+    local result
+    result="$(HOME="$TEST_TMP_DIR/mock_renpy_home" GSV_RENPY_DIR="$mock_renpy" gsv_scan_native_games "$mock_share" "$mock_cfg")"
+
+    assert_true "echo '$result' | jq . >/dev/null 2>&1" "Engine saves scan is valid JSON"
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_true "[ '$count' -ge 3 ]" "Found at least 3 engine save locations (got $count)"
+
+    local has_hk
+    has_hk="$(echo "$result" | jq -r '[.[] | select(.GameName == "Hollow Knight")] | length')"
+    assert_equals "1" "$has_hk" "Unity3D Hollow Knight save discovered"
+
+    local has_brotato
+    has_brotato="$(echo "$result" | jq -r '[.[] | select(.GameName == "Brotato")] | length')"
+    assert_equals "1" "$has_brotato" "Godot Brotato save discovered"
+}
+
+test_deep_scan_expanded_patterns() {
+    local mock_folder="$TEST_TMP_DIR/mock_deep_expanded"
+    # Unreal Engine Saved/SaveGames pattern
+    mkdir -p "$mock_folder/MyUnrealGame/Saved/SaveGames"
+    echo "unreal_save" > "$mock_folder/MyUnrealGame/Saved/SaveGames/Slot1.sav"
+
+    # .savegame extension
+    mkdir -p "$mock_folder/CyberRPG"
+    echo "cyber_save" > "$mock_folder/CyberRPG/manual0.savegame"
+
+    local result
+    result="$(gsv_deep_scan_folder "$mock_folder")"
+
+    local count
+    count="$(echo "$result" | jq 'length')"
+    assert_equals "2" "$count" "Deep scan found both Unreal and .savegame titles"
 }
 
 test_ui_dir_picker_cli() {
@@ -1953,8 +2061,11 @@ run_test test_logging_helpers "Logging helpers (gsv_log_*)"
 
 run_test test_scan_steam_proton "Scan Steam Proton prefix (gsv_scan_steam_proton)"
 run_test test_scan_steam_proton_incomplete_prefix "Graceful handling of incomplete Proton prefixes"
+run_test test_scan_steam_userdata "Scan Steam UserData saves (gsv_scan_steam_userdata)"
+run_test test_scan_scene_saves "Scan scene and emulated Steam saves (CODEX, RUNE, etc.)"
 run_test test_title_lookup_special_characters "JSON escaping and title lookup with special characters"
 run_test test_scan_native_games "Scan native Linux game saves (gsv_scan_native_games)"
+run_test test_scan_native_game_engines "Scan native game engine saves (Unity, Godot, Ren'Py)"
 run_test test_scan_wine_lutris_heroic "Scan Wine, Lutris, and Heroic prefixes (gsv_scan_wine_lutris_heroic)"
 run_test test_scan_emulators "Scan emulator save paths (gsv_scan_emulators)"
 run_test test_scan_eden "Scan Eden Switch emulator saves (gsv_scan_emulators)"
@@ -1963,6 +2074,7 @@ run_test test_scan_litchi "Scan Litchi Switch save manager saves (gsv_scan_emula
 run_test test_scan_kyty_ps5 "Scan Kyty PS5/PS4 emulator saves (gsv_scan_emulators)"
 run_test test_scan_shadps4 "Scan shadPS4 PS4 emulator saves (gsv_scan_emulators)"
 run_test test_deep_scan_folder "Deep scan custom folder for save extensions (gsv_deep_scan_folder)"
+run_test test_deep_scan_expanded_patterns "Deep scan with expanded engine and save patterns"
 run_test test_update_scan_database "Update scan database JSON and schema compliance (gsv_update_scan_database)"
 run_test test_scan_all "Aggregate all scans (gsv_scan_all)"
 
