@@ -110,8 +110,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $script:Root 'config\settings.json')
     try { Save-GSVSettings -Settings $settings } catch { }
 }
 $vault = if ($BackupRoot) { $BackupRoot } else { $settings.BackupRoot }
-$logDir = Join-Path $vault 'logs'
-$logFile = Join-Path $logDir ('gsv-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
+# Do not use Join-Path here: it throws when the vault lives on a drive that is
+# not currently mounted (for example an unplugged backup USB), and even
+# "help" should still work in that case.
+$logDir = if ($vault) { [System.IO.Path]::Combine([string]$vault, 'logs') } else { $null }
+$logFile = if ($logDir) { [System.IO.Path]::Combine($logDir, ('gsv-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))) } else { $null }
 
 function Write-Title {
     param([string]$Text)
