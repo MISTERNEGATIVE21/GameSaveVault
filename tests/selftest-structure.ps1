@@ -79,11 +79,13 @@ foreach ($scriptPath in $allScripts) {
 # 5. Verify root shim forwarding functionality
 $rootCli = Join-Path $root 'GameSaveVault.ps1'
 if (Test-Path -LiteralPath $rootCli) {
-    # Run GameSaveVault.ps1 help via pwsh and verify it forwards to windows/GameSaveVault.ps1
+    # Run GameSaveVault.ps1 help via pwsh (or Windows PowerShell) and verify it
+    # forwards to windows/GameSaveVault.ps1
     $env:SystemDrive = 'C:'
     $env:USERPROFILE = [System.IO.Path]::GetTempPath()
     try {
-        $output = & pwsh -NoProfile -File $rootCli help 2>&1
+        $shellExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { Join-Path $PSHOME 'powershell.exe' }
+        $output = & $shellExe -NoProfile -File $rootCli help 2>&1
         $exitCode = $LASTEXITCODE
         $outputStr = ($output -join "`n")
         $hasUsage = $outputStr -match 'USAGE' -or $outputStr -match 'GameSaveVault'
