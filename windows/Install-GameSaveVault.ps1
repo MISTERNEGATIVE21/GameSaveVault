@@ -9,10 +9,10 @@
     the desktop / Start-menu shortcuts.
 
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/Install-GameSaveVault.ps1 | iex"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/windows/Install-GameSaveVault.ps1 | iex"
 
 .EXAMPLE
-    $s = irm 'https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/Install-GameSaveVault.ps1'
+    $s = irm 'https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/windows/Install-GameSaveVault.ps1'
     & ([scriptblock]::Create($s)) -ScheduledTask -Time 21:30
 #>
 

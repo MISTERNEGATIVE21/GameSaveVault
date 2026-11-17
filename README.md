@@ -15,7 +15,7 @@ It works with **any games**, including normal Steam/Epic/GOG games, repack and c
 Click **[Code → Download ZIP](https://github.com/MISTERNEGATIVE21/GameSaveVault/archive/refs/heads/main.zip)**, or run this one-line PowerShell installer:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/Install-GameSaveVault.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/windows/Install-GameSaveVault.ps1 | iex"
 ```
 
 It downloads the latest `main` into `%LOCALAPPDATA%\GameSaveVault`, then creates the desktop and Start-menu shortcuts.
@@ -23,7 +23,7 @@ It downloads the latest `main` into `%LOCALAPPDATA%\GameSaveVault`, then creates
 To include the optional daily backup task, run:
 
 ```powershell
-$s = irm 'https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/Install-GameSaveVault.ps1'
+$s = irm 'https://raw.githubusercontent.com/MISTERNEGATIVE21/GameSaveVault/main/windows/Install-GameSaveVault.ps1'
 & ([scriptblock]::Create($s)) -ScheduledTask -Time 21:30
 ```
 
